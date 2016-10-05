@@ -652,6 +652,8 @@ struct CoroSplit : public CallGraphSCCPass {
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     CallGraphSCCPass::getAnalysisUsage(AU);
   }
+
+  StringRef getPassName() const override { return "Coroutine Splitting"; }
 };
 }
 
