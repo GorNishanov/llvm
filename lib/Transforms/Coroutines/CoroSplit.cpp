@@ -183,7 +183,8 @@ static void replaceFallthroughCoroEnd(IntrinsicInst *End,
 
 // In Resumers, we replace unwind coro.end with True to force the immediate
 // unwind to caller.
-static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
+static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap,
+                                  Value *ResumeFramePtr) {
   if (Shape.CoroEnds.empty())
     return;
 
@@ -203,6 +204,17 @@ static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
       CleanupRet->getParent()->getTerminator()->eraseFromParent();
     }
 
+    // If exception escapes in the resume part of the coroutine, assume that
+    // the coroutine is suspended at the final suspend point.
+    if (ResumeFramePtr) {
+      IRBuilder<> Builder(NewCE);
+      // Final suspend point is represented by storing zero in ResumeFnAddr.
+      auto *GepIndex = Builder.CreateConstInBoundsGEP2_32(Shape.FrameTy,
+          ResumeFramePtr, 0, 0, "ResumeFn.addr");
+      auto *NullPtr = ConstantPointerNull::get(cast<PointerType>(
+          cast<PointerType>(GepIndex->getType())->getElementType()));
+      Builder.CreateStore(NullPtr, GepIndex);
+    }
     NewCE->replaceAllUsesWith(True);
     NewCE->eraseFromParent();
   }
@@ -324,8 +336,9 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   }
 
   // Remove coro.end intrinsics.
+  const bool IsResume = (FnIndex == 0);
   replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
-  replaceUnwindCoroEnds(Shape, VMap);
+  replaceUnwindCoroEnds(Shape, VMap, IsResume ? NewFramePtr : nullptr);
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
   // to suppress deallocation code.
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
