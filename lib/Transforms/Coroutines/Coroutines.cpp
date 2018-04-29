@@ -281,6 +281,9 @@ void coro::Shape::buildFrom(Function &F) {
         }
         break;
       }
+      case Intrinsic::coro_eh_suspend:
+        CoroEhSuspends.push_back(II);
+        break;
       case Intrinsic::coro_end:
         CoroEnds.push_back(cast<CoroEndInst>(II));
         if (CoroEnds.back()->isFallthrough()) {

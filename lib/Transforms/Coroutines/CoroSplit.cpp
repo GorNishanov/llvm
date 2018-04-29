@@ -181,6 +181,31 @@ static void replaceFallthroughCoroEnd(IntrinsicInst *End,
   BB->getTerminator()->eraseFromParent();
 }
 
+// TODO: share the code with coro.end replacement (almost the same).
+// In Resumers, we replace unwind coro.end with True to force the immediate
+// unwind to caller.
+static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
+  if (Shape.CoroEhSuspends.empty())
+    return;
+
+  LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
+  auto *True = ConstantInt::getTrue(Context);
+  for (IntrinsicInst *CE : Shape.CoroEhSuspends) {
+    auto *NewCE = cast<IntrinsicInst>(VMap[CE]);
+
+    // If coro.end has an associated bundle, add cleanupret instruction.
+    if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
+      Value *FromPad = Bundle->Inputs[0];
+      auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
+      NewCE->getParent()->splitBasicBlock(NewCE);
+      CleanupRet->getParent()->getTerminator()->eraseFromParent();
+    }
+
+    NewCE->replaceAllUsesWith(True);
+    NewCE->eraseFromParent();
+  }
+}
+
 // In Resumers, we replace unwind coro.end with True to force the immediate
 // unwind to caller.
 static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
@@ -237,6 +262,28 @@ static void handleFinalSuspend(IRBuilder<> &Builder, Value *FramePtr,
     Builder.CreateCondBr(Cond, ResumeBB, NewSwitchBB);
     OldSwitchBB->getTerminator()->eraseFromParent();
   }
+}
+
+static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None, IntrinsicInst *EhSuspend,
+                                              SwitchInst *Switch) {
+  dbgs() << "-----------------------------\n";
+  EhSuspend->dump();
+
+  if (auto Bundle = EhSuspend->getOperandBundle(LLVMContext::OB_funclet)) {
+    Value *FromPad = Bundle->Inputs[0];
+    FromPad->replaceAllUsesWith(None);
+
+    auto * const BB = EhSuspend->getParent();
+    auto * const NewBB = BB->splitBasicBlock(EhSuspend);
+    EhSuspend->eraseFromParent();
+
+    ConstantInt *IndexVal = Shape.getIndex(-1);
+    Switch->addCase(IndexVal, NewBB);
+  }
+
+  Switch->dump();
+
+  dbgs() << "-----------------------------\n";
 }
 
 // Create a resume clone by cloning the body of the original function, setting
@@ -307,7 +354,7 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   // the coroutine suspended at the final suspend point.
   if (Shape.HasFinalSuspend) {
     auto *Switch = cast<SwitchInst>(VMap[Shape.ResumeSwitch]);
-    bool IsDestroy = FnIndex != 0;
+    bool IsDestroy = FnIndex != coro::Shape::ResumeField;
     handleFinalSuspend(Builder, NewFramePtr, Shape, Switch, IsDestroy);
   }
 
@@ -324,8 +371,31 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   }
 
   // Remove coro.end intrinsics.
-  replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
-  replaceUnwindCoroEnds(Shape, VMap);
+  for (auto *CoroEnd : Shape.CoroEnds)
+    replaceFallthroughCoroEnd(CoroEnd, VMap);
+
+  if (FnIndex == coro::Shape::ResumeField) {
+    replaceUnwindCoroEnds(Shape, VMap); // TODO: do the same with CoroEhSuspends instead
+    replaceEhSuspends(Shape, VMap);
+  } else {
+    // take care of landings
+
+    for (auto &Case : Switch->cases()) {
+      auto *BB = Case.getCaseSuccessor();
+      auto *NextBB = BB->getSingleSuccessor();
+      auto *Node = cast<PHINode>(NextBB->begin());
+      Node->dump();
+      Node->replaceAllUsesWith(Node->getIncomingValueForBlock(BB));
+      Node->eraseFromParent();
+      //Node->setIncomingValue(0, UndefValue::get(Node->getType()));
+      //Node->dump();
+    }
+
+    auto *None = ConstantTokenNone::get(Builder.getContext());
+    for (auto *EhSuspend : Shape.CoroEhSuspends)
+      handleEhSuspendInDestroyOrCleanup(Shape, None, cast<IntrinsicInst>(VMap[EhSuspend]), Switch);
+  }
+
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
   // to suppress deallocation code.
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),

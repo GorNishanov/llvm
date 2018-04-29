@@ -187,6 +187,8 @@ SuspendCrossingInfo::SuspendCrossingInfo(Function &F, coro::Shape &Shape)
     markSuspendBlock(CSI);
     markSuspendBlock(CSI->getCoroSave());
   }
+  for (IntrinsicInst *EhSuspend : Shape.CoroEhSuspends)
+    markSuspendBlock(EhSuspend);
 
   // Iterate propagating consumes and kills until they stop changing.
   int Iteration = 0;
@@ -399,8 +401,10 @@ static StructType *buildFrameType(Function &F, coro::Shape &Shape,
 
     CurrentDef = S.def();
     // PromiseAlloca was already added to Types array earlier.
-    if (CurrentDef == Shape.PromiseAlloca)
+    if (CurrentDef == Shape.PromiseAlloca) {
+      S.setFieldIndex(coro::Shape::PromiseField);
       continue;
+    }
 
     Type *Ty = nullptr;
     if (auto *AI = dyn_cast<AllocaInst>(CurrentDef)) {
@@ -517,9 +521,12 @@ static Instruction *insertSpills(SpillInfo &Spills, coro::Shape &Shape) {
       if (auto *AI = dyn_cast<AllocaInst>(CurrentValue)) {
         // Spilled AllocaInst will be replaced with GEP from the coroutine frame
         // there is no spill required.
-        Allocas.emplace_back(AI, Index);
-        if (!AI->isStaticAlloca())
-          report_fatal_error("Coroutines cannot handle non static allocas yet");
+        if (Shape.PromiseAlloca != AI) {
+          Allocas.emplace_back(AI, Index);
+          if (!AI->isStaticAlloca())
+            report_fatal_error(
+                "Coroutines cannot handle non static allocas yet");
+        }
       } else {
         // Otherwise, create a store instruction storing the value into the
         // coroutine frame.
@@ -883,6 +890,10 @@ void coro::buildCoroutineFrame(Function &F, Shape &Shape) {
   for (CoroEndInst *CE : Shape.CoroEnds)
     splitAround(CE, "CoroEnd");
 
+  // Sames with coro.eh.suspends into their own blocks.
+  for (IntrinsicInst *EhSuspend : Shape.CoroEhSuspends)
+    splitAround(EhSuspend, "CoroEhSuspend");
+
   // Transforms multi-edge PHI Nodes, so that any value feeding into a PHI will
   // never has its definition separated from the PHI by the suspend point.
   rewritePHIs(F);
@@ -919,13 +930,15 @@ void coro::buildCoroutineFrame(Function &F, Shape &Shape) {
   for (Instruction &I : instructions(F)) {
     // Values returned from coroutine structure intrinsics should not be part
     // of the Coroutine Frame.
-    if (isCoroutineStructureIntrinsic(I) || &I == Shape.CoroBegin)
+    if (isCoroutineStructureIntrinsic(I) || &I == Shape.CoroBegin || isa<CleanupPadInst>(I))
       continue;
+
+#if 0
     // The Coroutine Promise always included into coroutine frame, no need to
     // check for suspend crossing.
     if (Shape.PromiseAlloca == &I)
       continue;
-
+#endif
     for (User *U : I.users())
       if (Checker.isDefinitionAcrossSuspend(I, U)) {
         // We cannot spill a token.
