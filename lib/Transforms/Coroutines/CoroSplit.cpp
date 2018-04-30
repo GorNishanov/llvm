@@ -296,6 +296,8 @@ static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None,
   dbgs() << "-----------------------------\n";
   EhSuspend->dump();
 
+  int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
+
   if (auto Bundle = EhSuspend->getOperandBundle(LLVMContext::OB_funclet)) {
     Value *FromPad = Bundle->Inputs[0];
     FromPad->replaceAllUsesWith(None);
@@ -304,7 +306,7 @@ static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None,
     auto *const NewBB = BB->splitBasicBlock(EhSuspend);
     EhSuspend->eraseFromParent();
 
-    ConstantInt *IndexVal = Shape.getIndex(-1);
+    ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
     Switch->addCase(IndexVal, NewBB);
   }
 
