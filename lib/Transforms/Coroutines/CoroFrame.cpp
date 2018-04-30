@@ -384,7 +384,8 @@ static StructType *buildFrameType(Function &F, coro::Shape &Shape,
   auto *FnPtrTy = FnTy->getPointerTo();
 
   // Figure out how wide should be an integer type storing the suspend index.
-  unsigned IndexBits = std::max(1U, Log2_64_Ceil(Shape.CoroSuspends.size()));
+  unsigned IndexBits = std::max(1U, Log2_64_Ceil(Shape.CoroSuspends.size() +
+                                                 Shape.CoroEhSuspends.size()));
   Type *PromiseType = Shape.PromiseAlloca
                           ? Shape.PromiseAlloca->getType()->getElementType()
                           : Type::getInt1Ty(C);

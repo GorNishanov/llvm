@@ -46,7 +46,7 @@ namespace coro {
 bool declaresIntrinsics(Module &M, std::initializer_list<StringRef>);
 void replaceAllCoroAllocs(CoroBeginInst *CB, bool Replacement);
 void replaceAllCoroFrees(CoroBeginInst *CB, Value *Replacement);
-void replaceCoroFree(CoroIdInst *CoroId, bool Elide);
+void replaceCoroFree(CoroIdInst *CoroId, bool Elide = false);
 void updateCallGraph(Function &Caller, ArrayRef<Function *> Funcs,
                      CallGraph &CG, CallGraphSCC &SCC);
 
@@ -84,13 +84,15 @@ struct LLVM_LIBRARY_VISIBILITY Shape {
   BasicBlock *AllocaSpillBlock;
   SwitchInst *ResumeSwitch;
   AllocaInst *PromiseAlloca;
-  bool HasFinalSuspend;
+  //bool HasFinalSuspend;
+
+  int64_t FinalSuspendIndex;
 
   IntegerType *getIndexType() const {
     assert(FrameTy && "frame type not assigned");
     return cast<IntegerType>(FrameTy->getElementType(IndexField));
   }
-  ConstantInt *getIndex(uint64_t Value) const {
+  ConstantInt *getIndex(int64_t Value) const {
     return ConstantInt::get(getIndexType(), Value);
   }
 
