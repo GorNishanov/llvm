@@ -2813,9 +2813,7 @@ void Verifier::verifyCallSite(CallSite CS) {
       FoundFuncletBundle = true;
       Assert(BU.Inputs.size() == 1,
              "Expected exactly one funclet bundle operand", I);
-      // Temporary workaround until we create a way of getting rid of
-      // Funclet bundles from call instructions
-      Assert(isa<ConstantTokenNone>(BU.Inputs.front()) || isa<FuncletPadInst>(BU.Inputs.front()),
+      Assert(isa<FuncletPadInst>(BU.Inputs.front()),
              "Funclet bundle operands should correspond to a FuncletPadInst",
              I);
     }
