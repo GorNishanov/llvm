@@ -790,6 +790,8 @@ def int_coro_param : Intrinsic<[llvm_i1_ty], [llvm_ptr_ty, llvm_ptr_ty],
 
 // Coroutine Manipulation Intrinsics.
 
+def int_coro_cc_addr : Intrinsic<[llvm_ptr_ty], [llvm_ptr_ty], []>;
+def int_coro_resume_cc : Intrinsic<[], [llvm_ptr_ty, llvm_ptr_ty], [Throws]>;
 def int_coro_resume : Intrinsic<[], [llvm_ptr_ty], [Throws]>;
 def int_coro_destroy : Intrinsic<[], [llvm_ptr_ty], [Throws]>;
 def int_coro_done : Intrinsic<[llvm_i1_ty], [llvm_ptr_ty],
