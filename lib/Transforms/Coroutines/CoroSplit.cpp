@@ -435,6 +435,16 @@ static void postSplitCleanup(Function &F) {
   FPM.doFinalization();
 }
 
+static void preSplitCleanup(Function &F) {
+  F.removeFnAttr(Attribute::OptimizeNone);
+  legacy::FunctionPassManager FPM(F.getParent());
+  FPM.add(createSROAPass());
+  FPM.doInitialization();
+  FPM.run(F);
+  FPM.doFinalization();
+  removeUnreachableBlocks(F);
+}
+
 // Assuming we arrived at the block NewBlock from Prev instruction, store
 // PHI's incoming values in the ResolvedValues map.
 static void
@@ -709,6 +719,7 @@ static void relocateInstructionBefore(CoroBeginInst *CoroBegin, Function &F) {
 }
 
 static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
+  preSplitCleanup(F);
   coro::Shape Shape(F);
   if (!Shape.CoroBegin)
     return;
