@@ -743,11 +743,23 @@ static void rewritePHIs(Function &F) {
     rewritePHIs(*BB);
 }
 
+static bool isPthreadSelf(Instruction &V) {
+  if (CallSite CS{&V})
+    if (auto *F = CS.getCalledFunction()) {
+      LLVM_DEBUG(dbgs() << ">>>>" << F->getName() << "<<<<\n");
+      if (F->getName() == "pthread_self")
+        return true;
+    }
+
+  return false;
+}
+
 // Check for instructions that we can recreate on resume as opposed to spill
 // the result into a coroutine frame.
 static bool materializable(Instruction &V) {
   return isa<CastInst>(&V) || isa<GetElementPtrInst>(&V) ||
-         isa<BinaryOperator>(&V) || isa<CmpInst>(&V) || isa<SelectInst>(&V);
+         isa<BinaryOperator>(&V) || isa<CmpInst>(&V) || isa<SelectInst>(&V) ||
+         isPthreadSelf(V);
 }
 
 // Check for structural coroutine intrinsics that should not be spilled into
