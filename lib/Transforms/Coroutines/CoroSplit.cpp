@@ -239,6 +239,22 @@ static void handleFinalSuspend(IRBuilder<> &Builder, Value *FramePtr,
   }
 }
 
+static void createResumeParts(Function &ResumeFn) {
+  SmallVector<Function *, 4> Parts;
+
+  auto *AllocaSpillBB = &ResumeFn.getEntryBlock();
+  auto *SwitchBB = AllocaSpillBB->getSingleSuccessor();
+  auto *Switch = cast<SwitchInst>(SwitchBB->getTerminator());
+
+  for (auto &Case : Switch->cases()) {
+    ValueToValueMapTy VMap;
+    auto *NewPart = CloneFunction(&ResumeFn, VMap);
+    auto *NewSuccessor = cast<BasicBlock>(VMap[Case.getCaseSuccessor()]);
+    NewSuccessor->moveBefore(&NewPart->getEntryBlock());
+    Parts.push_back(NewPart);
+  }
+}
+
 // Create a resume clone by cloning the body of the original function, setting
 // new entry block and replacing coro.suspend an appropriate value to force
 // resume or cleanup pass for every suspend point.
@@ -732,6 +748,8 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   auto ResumeClone = createClone(F, ".resume", Shape, ResumeEntry, 0);
   auto DestroyClone = createClone(F, ".destroy", Shape, ResumeEntry, 1);
   auto CleanupClone = createClone(F, ".cleanup", Shape, ResumeEntry, 2);
+
+  createResumeParts(*ResumeClone);
 
   // We no longer need coro.end in F.
   removeCoroEnds(Shape);
