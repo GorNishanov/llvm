@@ -9,12 +9,12 @@
 define void @callResume(i8* %hdl) {
 ; CHECK-NEXT: entry
 entry:
-; CHECK-NEXT: %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0)
+; CHECK-NEXT: %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0, i8* null, token none)
 ; CHECK-NEXT: %1 = bitcast i8* %0 to void (i8*)*
 ; CHECK-NEXT: call fastcc void %1(i8* %hdl)
   call void @llvm.coro.resume(i8* %hdl)
 
-; CHECK-NEXT: %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1)
+; CHECK-NEXT: %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1, i8* null, token none)
 ; CHECK-NEXT: %3 = bitcast i8* %2 to void (i8*)*
 ; CHECK-NEXT: call fastcc void %3(i8* %hdl)
   call void @llvm.coro.destroy(i8* %hdl)
@@ -27,7 +27,7 @@ entry:
 define void @eh(i8* %hdl) personality i8* null {
 ; CHECK-NEXT: entry
 entry:
-;  CHECK-NEXT: %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0)
+;  CHECK-NEXT: %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0, i8* null, token none)
 ;  CHECK-NEXT: %1 = bitcast i8* %0 to void (i8*)*
 ;  CHECK-NEXT: invoke fastcc void %1(i8* %hdl)
   invoke void @llvm.coro.resume(i8* %hdl)

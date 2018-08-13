@@ -112,7 +112,8 @@ Value *coro::LowererBase::makeSubFnCall(Value *Arg, int Index,
   assert(Index >= CoroSubFnInst::IndexFirst &&
          Index < CoroSubFnInst::IndexLast &&
          "makeSubFnCall: Index value out of range");
-  auto *Call = CallInst::Create(Fn, {Arg, IndexVal}, "", InsertPt);
+  auto *Call = CallInst::Create(Fn, {Arg, IndexVal, NullPtr,
+    ConstantTokenNone::get(TheModule.getContext())}, "", InsertPt);
 
   auto *Bitcast =
       new BitCastInst(Call, ResumeFnType->getPointerTo(), "", InsertPt);

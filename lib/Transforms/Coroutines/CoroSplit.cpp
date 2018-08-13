@@ -239,6 +239,7 @@ static void handleFinalSuspend(IRBuilder<> &Builder, Value *FramePtr,
   }
 }
 
+#if 0
 static void createResumeParts(Function &ResumeFn) {
   SmallVector<Function *, 4> Parts;
 
@@ -254,6 +255,7 @@ static void createResumeParts(Function &ResumeFn) {
     Parts.push_back(NewPart);
   }
 }
+#endif
 
 // Create a resume clone by cloning the body of the original function, setting
 // new entry block and replacing coro.suspend an appropriate value to force
@@ -749,7 +751,7 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   auto DestroyClone = createClone(F, ".destroy", Shape, ResumeEntry, 1);
   auto CleanupClone = createClone(F, ".cleanup", Shape, ResumeEntry, 2);
 
-  createResumeParts(*ResumeClone);
+  // createResumeParts(*ResumeClone); // NOT NEEDED YET
 
   // We no longer need coro.end in F.
   removeCoroEnds(Shape);

@@ -1,5 +1,5 @@
 ; Tests that the dynamic allocation and deallocation of the coroutine frame is
-; elided and any tail calls referencing the coroutine frame has the tail 
+; elided and any tail calls referencing the coroutine frame has the tail
 ; call attribute removed.
 ; RUN: opt < %s -S -inline -coro-elide -instsimplify -simplifycfg | FileCheck %s
 
@@ -17,7 +17,7 @@ declare void @may_throw()
 declare i8* @CustomAlloc(i32)
 declare void @CustomFree(i8*)
 
-@f.resumers = internal constant [3 x void (%f.frame*)*] 
+@f.resumers = internal constant [3 x void (%f.frame*)*]
   [void (%f.frame*)* @f.resume, void (%f.frame*)* @f.destroy, void (%f.frame*)* @f.cleanup]
 
 ; a coroutine start function
@@ -34,9 +34,9 @@ dyn.alloc:
 coro.begin:
   %phi = phi i8* [ null, %entry ], [ %alloc, %dyn.alloc ]
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %phi)
-  invoke void @may_throw() 
+  invoke void @may_throw()
     to label %ret unwind label %ehcleanup
-ret:          
+ret:
   ret i8* %hdl
 
 ehcleanup:
@@ -68,12 +68,12 @@ entry:
   tail call void @bar(i8* null)
 
 ; CHECK-NEXT: call fastcc void bitcast (void (%f.frame*)* @f.resume to void (i8*)*)(i8* %vFrame)
-  %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0)
+  %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0, i8* null, token none)
   %1 = bitcast i8* %0 to void (i8*)*
   call fastcc void %1(i8* %hdl)
 
 ; CHECK-NEXT: call fastcc void bitcast (void (%f.frame*)* @f.cleanup to void (i8*)*)(i8* %vFrame)
-  %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1)
+  %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1, i8* null, token none)
   %3 = bitcast i8* %2 to void (i8*)*
   call fastcc void %3(i8* %hdl)
 
@@ -96,11 +96,11 @@ entry:
 ; CHECK-LABEL: if.then:
 if.then:
 ; CHECK: call fastcc void bitcast (void (%f.frame*)* @f.resume to void (i8*)*)(i8*
-  %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0)
+  %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0, i8* null, token none)
   %1 = bitcast i8* %0 to void (i8*)*
   call fastcc void %1(i8* %hdl)
 ; CHECK-NEXT: call fastcc void bitcast (void (%f.frame*)* @f.destroy to void (i8*)*)(i8*
-  %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1)
+  %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1, i8* null, token none)
   %3 = bitcast i8* %2 to void (i8*)*
   call fastcc void %3(i8* %hdl)
   br label %return
@@ -139,12 +139,12 @@ entry:
   tail call void @bar(i8* null)
 
 ; CHECK-NEXT: call fastcc void bitcast (void (%f.frame*)* @f.resume to void (i8*)*)(i8*
-  %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0)
+  %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0, i8* null, token none)
   %1 = bitcast i8* %0 to void (i8*)*
   call fastcc void %1(i8* %hdl)
 
 ; CHECK-NEXT: call fastcc void bitcast (void (%f.frame*)* @f.destroy to void (i8*)*)(i8*
-  %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1)
+  %2 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 1, i8* null, token none)
   %3 = bitcast i8* %2 to void (i8*)*
   call fastcc void %3(i8* %hdl)
 
@@ -157,4 +157,4 @@ declare i1 @llvm.coro.alloc(token)
 declare i8* @llvm.coro.free(token, i8*)
 declare i8* @llvm.coro.begin(token, i8*)
 declare i8* @llvm.coro.frame(token)
-declare i8* @llvm.coro.subfn.addr(i8*, i8)
+declare i8* @llvm.coro.subfn.addr(i8*, i8, i8*, token)
