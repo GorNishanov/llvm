@@ -194,12 +194,16 @@ bool Lowerer::shouldElide(Function *F, DominatorTree &DT) const {
   // Filter out the coro.destroy that lie along exceptional paths.
   SmallPtrSet<CoroSubFnInst *, 4> DAs;
   for (CoroSubFnInst *DA : DestroyAddr) {
+#if 1 // HACKHACK: temporary hack
+    DAs.insert(DA);
+#else
     for (Instruction *TI : Terminators) {
       if (DT.dominates(DA, TI)) {
         DAs.insert(DA);
         break;
       }
     }
+#endif
   }
 
   // Find all the coro.begin referenced by coro.destroy along happy paths.

@@ -105,14 +105,17 @@ coro::LowererBase::LowererBase(Module &M)
 //    bitcast i8* %2 to void(i8*)*
 
 Value *coro::LowererBase::makeSubFnCall(Value *Arg, int Index,
+                                        Value *Continuation,
                                         Instruction *InsertPt) {
   auto *IndexVal = ConstantInt::get(Type::getInt8Ty(Context), Index);
   auto *Fn = Intrinsic::getDeclaration(&TheModule, Intrinsic::coro_subfn_addr);
+  if (Continuation == nullptr)
+    Continuation = NullPtr;
 
   assert(Index >= CoroSubFnInst::IndexFirst &&
          Index < CoroSubFnInst::IndexLast &&
          "makeSubFnCall: Index value out of range");
-  auto *Call = CallInst::Create(Fn, {Arg, IndexVal, NullPtr,
+  auto *Call = CallInst::Create(Fn, {Arg, IndexVal, Continuation,
     ConstantTokenNone::get(TheModule.getContext())}, "", InsertPt);
 
   auto *Bitcast =

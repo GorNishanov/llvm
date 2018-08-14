@@ -833,8 +833,8 @@ static void prepareForSplit(Function &F, CallGraph &CG) {
   coro::LowererBase Lowerer(M);
   Instruction *InsertPt = F.getEntryBlock().getTerminator();
   auto *Null = ConstantPointerNull::get(Type::getInt8PtrTy(F.getContext()));
-  auto *DevirtFnAddr =
-      Lowerer.makeSubFnCall(Null, CoroSubFnInst::RestartTrigger, InsertPt);
+  auto *DevirtFnAddr = Lowerer.makeSubFnCall(
+      Null, CoroSubFnInst::RestartTrigger, nullptr, InsertPt);
   auto *IndirectCall = CallInst::Create(DevirtFnAddr, Null, "", InsertPt);
 
   // Update CG graph with an indirect call we just added.

@@ -59,7 +59,8 @@ struct LowererBase {
   ConstantPointerNull *const NullPtr;
 
   LowererBase(Module &M);
-  Value *makeSubFnCall(Value *Arg, int Index, Instruction *InsertPt);
+  Value *makeSubFnCall(Value *Arg, int Index, Value *Continuation,
+                       Instruction *InsertPt);
 };
 
 // Holds structural Coroutine Intrinsics for a particular function and other

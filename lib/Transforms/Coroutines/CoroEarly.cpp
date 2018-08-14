@@ -29,7 +29,8 @@ class Lowerer : public coro::LowererBase {
   PointerType *const AnyResumeFnPtrTy;
   Constant *NoopCoro = nullptr;
 
-  void lowerResumeOrDestroy(CallSite CS, CoroSubFnInst::ResumeKind);
+  void lowerResumeOrDestroy(CallSite CS, CoroSubFnInst::ResumeKind,
+                            Value *Continuation = nullptr);
   void lowerCoroPromise(CoroPromiseInst *Intrin);
   void lowerCoroDone(IntrinsicInst *II);
   void lowerCoroNoop(IntrinsicInst *II);
@@ -48,10 +49,10 @@ public:
 // an address returned by coro.subfn.addr intrinsic. This is done so that
 // CGPassManager recognizes devirtualization when CoroElide pass replaces a call
 // to coro.subfn.addr with an appropriate function address.
-void Lowerer::lowerResumeOrDestroy(CallSite CS,
-                                   CoroSubFnInst::ResumeKind Index) {
-  Value *ResumeAddr =
-      makeSubFnCall(CS.getArgOperand(0), Index, CS.getInstruction());
+void Lowerer::lowerResumeOrDestroy(CallSite CS, CoroSubFnInst::ResumeKind Index,
+                                   Value *Continuation) {
+  Value *ResumeAddr = makeSubFnCall(CS.getArgOperand(0), Index, Continuation,
+                                    CS.getInstruction());
   CS.setCalledFunction(ResumeAddr);
   CS.setCallingConv(CallingConv::Fast);
 }
@@ -190,6 +191,10 @@ bool Lowerer::lowerEarlyIntrinsics(Function &F) {
           }
         }
         break;
+      case Intrinsic::coro_resume_cc:
+        lowerResumeOrDestroy(CS, CoroSubFnInst::ResumeIndex,
+                             CS.getArgOperand(1));
+        break;
       case Intrinsic::coro_resume:
         lowerResumeOrDestroy(CS, CoroSubFnInst::ResumeIndex);
         break;
@@ -235,7 +240,8 @@ struct CoroEarly : public FunctionPass {
     if (coro::declaresIntrinsics(
             M, {"llvm.coro.id", "llvm.coro.destroy", "llvm.coro.done",
                 "llvm.coro.end", "llvm.coro.noop", "llvm.coro.free",
-                "llvm.coro.promise", "llvm.coro.resume", "llvm.coro.suspend"}))
+                "llvm.coro.promise", "llvm.coro.resume", "llvm.coro.resume.cc",
+                "llvm.coro.suspend"}))
       L = llvm::make_unique<Lowerer>(M);
     return false;
   }
