@@ -69,11 +69,11 @@ void Lowerer::lowerCoroPromise(CoroPromiseInst *Intrin) {
   unsigned Alignement = Intrin->getAlignment();
   Type *Int8Ty = Builder.getInt8Ty();
 
-  auto *SampleStruct =
-      StructType::get(Context, {AnyResumeFnPtrTy, AnyResumeFnPtrTy, Int8Ty});
+  auto *SampleStruct = StructType::get(
+      Context, {AnyResumeFnPtrTy, AnyResumeFnPtrTy, Int8Ptr, Int8Ty});
   const DataLayout &DL = TheModule.getDataLayout();
   int64_t Offset = alignTo(
-      DL.getStructLayout(SampleStruct)->getElementOffset(2), Alignement);
+      DL.getStructLayout(SampleStruct)->getElementOffset(3), Alignement);
   if (Intrin->isFromPromise())
     Offset = -Offset;
 

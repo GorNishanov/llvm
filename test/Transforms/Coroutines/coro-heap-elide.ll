@@ -135,7 +135,7 @@ entry:
 ; Tail call should remain tail calls
 ; CHECK: tail call void @bar(
   tail call void @bar(i8* %hdl)
-; CHECK: tail call void @bar(  
+; CHECK: tail call void @bar(
   tail call void @bar(i8* null)
 
 ; CHECK-NEXT: call fastcc void bitcast (void (%f.frame*)* @f.resume to void (i8*)*)(i8*

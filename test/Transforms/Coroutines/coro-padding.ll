@@ -31,17 +31,17 @@ suspend:
 }
 
 ; See if the padding was inserted before PackedStruct
-; CHECK-LABEL: %f.Frame = type { void (%f.Frame*)*, void (%f.Frame*)*, i1, i1, [6 x i8], %PackedStruct }
+; CHECK-LABEL: %f.Frame = type { void (%f.Frame*)*, void (%f.Frame*)*, i8*, i1, i1, [6 x i8], %PackedStruct }
 
 ; See if we used correct index to access packed struct (padding is field 4)
 ; CHECK-LABEL: @f(
-; CHECK:       %[[DATA:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 5
+; CHECK:       %[[DATA:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 6
 ; CHECK-NEXT:  call void @consume(%PackedStruct* %[[DATA]])
 ; CHECK: ret i8*
 
 ; See if we used correct index to access packed struct (padding is field 4)
 ; CHECK-LABEL: @f.resume(
-; CHECK:       %[[DATA:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 5
+; CHECK:       %[[DATA:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 6
 ; CHECK-NEXT:  call void @consume(%PackedStruct* %[[DATA]])
 ; CHECK: ret void
 

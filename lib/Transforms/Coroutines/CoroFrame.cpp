@@ -380,6 +380,7 @@ static StructType *buildFrameType(Function &F, coro::Shape &Shape,
   auto *FramePtrTy = FrameTy->getPointerTo();
   auto *FnTy = FunctionType::get(Type::getVoidTy(C), FramePtrTy,
                                  /*IsVarArgs=*/false);
+  auto *Int8Ptr = Type::getInt8PtrTy(C);
   auto *FnPtrTy = FnTy->getPointerTo();
 
   // Figure out how wide should be an integer type storing the suspend index.
@@ -387,7 +388,7 @@ static StructType *buildFrameType(Function &F, coro::Shape &Shape,
   Type *PromiseType = Shape.PromiseAlloca
                           ? Shape.PromiseAlloca->getType()->getElementType()
                           : Type::getInt1Ty(C);
-  SmallVector<Type *, 8> Types{FnPtrTy, FnPtrTy, PromiseType,
+  SmallVector<Type *, 8> Types{FnPtrTy, FnPtrTy, Int8Ptr, PromiseType,
                                Type::getIntNTy(C, IndexBits)};
   Value *CurrentDef = nullptr;
 

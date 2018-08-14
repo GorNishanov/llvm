@@ -34,12 +34,12 @@ pad:
 }
 
 ; See if the float was added to the frame
-; CHECK-LABEL: %f.Frame = type { void (%f.Frame*)*, void (%f.Frame*)*, i1, i1, i64, double }
+; CHECK-LABEL: %f.Frame = type { void (%f.Frame*)*, void (%f.Frame*)*, i8*, i1, i1, i64, double }
 
 ; See if the float was spilled into the frame
 ; CHECK-LABEL: @f(
 ; CHECK: %r = call double @print(
-; CHECK: %r.spill.addr = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 5
+; CHECK: %r.spill.addr = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 6
 ; CHECK: store double %r, double* %r.spill.addr
 ; CHECK: ret i8* %hdl
 

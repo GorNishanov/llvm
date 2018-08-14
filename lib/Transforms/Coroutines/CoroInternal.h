@@ -75,6 +75,7 @@ struct LLVM_LIBRARY_VISIBILITY Shape {
   enum {
     ResumeField,
     DestroyField,
+    ContinuationField,
     PromiseField,
     IndexField,
   };

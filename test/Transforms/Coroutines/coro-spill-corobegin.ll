@@ -1,7 +1,7 @@
 ; Check that we can spills coro.begin from an inlined inner coroutine.
 ; RUN: opt < %s -coro-split -S | FileCheck %s
 
-%g.Frame = type { void (%g.Frame*)*, void (%g.Frame*)*, i32, i1, i32 }
+%g.Frame = type { void (%g.Frame*)*, void (%g.Frame*)*, i8*, i32, i1, i32 }
 
 @g.resumers = private constant [3 x void (%g.Frame*)*] [void (%g.Frame*)* @g.dummy, void (%g.Frame*)* @g.dummy, void (%g.Frame*)* @g.dummy]
 
@@ -22,7 +22,7 @@ entry:
   switch i8 %tok, label %suspend [i8 0, label %resume
                                 i8 1, label %cleanup]
 resume:
-  %gvar.addr = getelementptr inbounds %g.Frame, %g.Frame* %gframe, i32 0, i32 4
+  %gvar.addr = getelementptr inbounds %g.Frame, %g.Frame* %gframe, i32 0, i32 5
   %gvar = load i32, i32* %gvar.addr
   call void @print.i32(i32 %gvar)
   br label %cleanup
@@ -37,21 +37,21 @@ suspend:
 }
 
 ; See if the i8* for coro.begin was added to f.Frame
-; CHECK-LABEL: %f.Frame = type { void (%f.Frame*)*, void (%f.Frame*)*, i1, i1, i8* }
+; CHECK-LABEL: %f.Frame = type { void (%f.Frame*)*, void (%f.Frame*)*, i8*, i1, i1, i8* }
 
 ; See if the g's coro.begin was spilled into the frame
 ; CHECK-LABEL: @f(
 ; CHECK: %innerid = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* bitcast ([3 x void (%g.Frame*)*]* @g.resumers to i8*))
 ; CHECK: %innerhdl = call noalias nonnull i8* @llvm.coro.begin(token %innerid, i8* null)
-; CHECK: %[[spilladdr:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 4
+; CHECK: %[[spilladdr:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %FramePtr, i32 0, i32 5
 ; CHECK: store i8* %innerhdl, i8** %[[spilladdr]]
 
 ; See if the coro.begin was loaded from the frame
 ; CHECK-LABEL: @f.resume(
-; CHECK: %[[innerhdlAddr:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %{{.+}}, i32 0, i32 4
+; CHECK: %[[innerhdlAddr:.+]] = getelementptr inbounds %f.Frame, %f.Frame* %{{.+}}, i32 0, i32 5
 ; CHECK: %[[innerhdl:.+]] = load i8*, i8** %[[innerhdlAddr]]
 ; CHECK: %[[gframe:.+]] = bitcast i8* %[[innerhdl]] to %g.Frame*
-; CHECK: %[[gvarAddr:.+]] = getelementptr inbounds %g.Frame, %g.Frame* %[[gframe]], i32 0, i32 4
+; CHECK: %[[gvarAddr:.+]] = getelementptr inbounds %g.Frame, %g.Frame* %[[gframe]], i32 0, i32 5
 ; CHECK: %[[gvar:.+]] = load i32, i32* %[[gvarAddr]]
 ; CHECK: call void @print.i32(i32 %[[gvar]])
 
