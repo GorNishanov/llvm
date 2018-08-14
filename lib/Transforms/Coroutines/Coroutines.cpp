@@ -20,6 +20,7 @@
 #include "llvm/Analysis/CallGraphSCCPass.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -96,7 +97,9 @@ coro::LowererBase::LowererBase(Module &M)
       Int8Ptr(Type::getInt8PtrTy(Context)),
       ResumeFnType(FunctionType::get(Type::getVoidTy(Context), Int8Ptr,
                                      /*isVarArg=*/false)),
-      NullPtr(ConstantPointerNull::get(Int8Ptr)) {}
+      NullPtr(ConstantPointerNull::get(Int8Ptr)),
+      AnyFrameTy(StructType::get(Context, {Int8Ptr, Int8Ptr, Int8Ptr})),
+      AnyFramePtrTy(AnyFrameTy->getPointerTo()) {}
 
 // Creates a sequence of instructions to obtain a resume function address using
 // llvm.coro.subfn.addr. It generates the following sequence:
@@ -111,6 +114,13 @@ Value *coro::LowererBase::makeSubFnCall(Value *Arg, int Index,
   auto *Fn = Intrinsic::getDeclaration(&TheModule, Intrinsic::coro_subfn_addr);
   if (Continuation == nullptr)
     Continuation = NullPtr;
+  else {
+    IRBuilder<> Builder(Context);
+    Builder.SetInsertPoint(InsertPt);
+    auto *FramePtr = Builder.CreateBitCast(Arg, AnyFramePtrTy);
+    auto *GepCont = Builder.CreateConstInBoundsGEP2_32(AnyFrameTy, FramePtr, 0, 2);
+    Builder.CreateStore(Continuation, GepCont);
+  }
 
   assert(Index >= CoroSubFnInst::IndexFirst &&
          Index < CoroSubFnInst::IndexLast &&

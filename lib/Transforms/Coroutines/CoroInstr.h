@@ -33,7 +33,7 @@ namespace llvm {
 
 /// This class represents the llvm.coro.subfn.addr instruction.
 class LLVM_LIBRARY_VISIBILITY CoroSubFnInst : public IntrinsicInst {
-  enum { FrameArg, IndexArg };
+  enum { FrameArg, IndexArg, ContinuationArg };
 
 public:
   enum ResumeKind {
@@ -51,6 +51,14 @@ public:
     assert(Index >= IndexFirst && Index < IndexLast &&
            "unexpected CoroSubFnInst index argument");
     return static_cast<ResumeKind>(Index);
+  }
+
+  Value* getContinuation() const {
+    auto *Result = getArgOperand(ContinuationArg);
+    if (isa<ConstantPointerNull>(Result))
+      return nullptr;
+
+    return Result;
   }
 
   ConstantInt *getRawIndex() const {

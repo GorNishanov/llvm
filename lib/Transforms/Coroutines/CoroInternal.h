@@ -57,6 +57,8 @@ struct LowererBase {
   PointerType *const Int8Ptr;
   FunctionType *const ResumeFnType;
   ConstantPointerNull *const NullPtr;
+  StructType *const AnyFrameTy;
+  PointerType *const AnyFramePtrTy;
 
   LowererBase(Module &M);
   Value *makeSubFnCall(Value *Arg, int Index, Value *Continuation,

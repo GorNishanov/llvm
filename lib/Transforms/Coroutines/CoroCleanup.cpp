@@ -38,13 +38,15 @@ static void simplifyCFG(Function &F) {
   FPM.doFinalization();
 }
 
+// TODO: Make these two functions members and pull common constants into Lowerer.
 static void lowerSubFn(IRBuilder<> &Builder, CoroSubFnInst *SubFn) {
   Builder.SetInsertPoint(SubFn);
   Value *FrameRaw = SubFn->getFrame();
   int Index = SubFn->getIndex();
+  auto *IntPtrTy = Builder.getInt8PtrTy();
 
   auto *FrameTy = StructType::get(
-      SubFn->getContext(), {Builder.getInt8PtrTy(), Builder.getInt8PtrTy()});
+      SubFn->getContext(), {IntPtrTy, IntPtrTy, IntPtrTy});
   PointerType *FramePtrTy = FrameTy->getPointerTo();
 
   Builder.SetInsertPoint(SubFn);
@@ -53,6 +55,22 @@ static void lowerSubFn(IRBuilder<> &Builder, CoroSubFnInst *SubFn) {
   auto *Load = Builder.CreateLoad(Gep);
 
   SubFn->replaceAllUsesWith(Load);
+}
+
+static void lowerGetCcAddr(IRBuilder<> &Builder, IntrinsicInst *II) {
+  auto *IntPtrTy = Builder.getInt8PtrTy();
+  auto *FrameTy =
+      StructType::get(II->getContext(), {IntPtrTy, IntPtrTy, IntPtrTy});
+  PointerType *FramePtrTy = FrameTy->getPointerTo();
+
+  Value *FrameRaw = II->getArgOperand(0);
+
+  Builder.SetInsertPoint(II);
+  auto *FramePtr = Builder.CreateBitCast(FrameRaw, FramePtrTy);
+  auto *Gep = Builder.CreateConstInBoundsGEP2_32(FrameTy, FramePtr, 0, 2);
+  auto *Load = Builder.CreateLoad(Gep);
+
+  II->replaceAllUsesWith(Load);
 }
 
 bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
@@ -78,6 +96,9 @@ bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
         break;
       case Intrinsic::coro_subfn_addr:
         lowerSubFn(Builder, cast<CoroSubFnInst>(II));
+        break;
+      case Intrinsic::coro_cc_addr:
+        lowerGetCcAddr(Builder, II);
         break;
       }
       II->eraseFromParent();
