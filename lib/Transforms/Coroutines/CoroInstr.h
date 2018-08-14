@@ -66,6 +66,38 @@ public:
   }
 };
 
+/// This class represents the llvm.coro.subfn.addr instruction.
+class LLVM_LIBRARY_VISIBILITY CoroSubFromBegInst : public IntrinsicInst {
+  enum { FrameArg, IndexArg };
+
+public:
+  enum ResumeKind {
+    ResumeIndex,
+    DestroyIndex,
+    IndexLast,
+    IndexFirst = ResumeIndex
+  };
+
+  ResumeKind getIndex() const {
+    int64_t Index = getRawIndex()->getValue().getSExtValue();
+    assert(Index >= IndexFirst && Index < IndexLast &&
+           "unexpected CoroSubFromBegInst index argument");
+    return static_cast<ResumeKind>(Index);
+  }
+
+  ConstantInt *getRawIndex() const {
+    return cast<ConstantInt>(getArgOperand(IndexArg));
+  }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_subfn_addr_from_beg;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
 /// This represents the llvm.coro.alloc instruction.
 class LLVM_LIBRARY_VISIBILITY CoroAllocInst : public IntrinsicInst {
 public:

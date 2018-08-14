@@ -7,7 +7,7 @@ entry:
   %need.alloc = call i1 @llvm.coro.alloc(token %id)
   br i1 %need.alloc, label %dyn.alloc, label %begin
 
-dyn.alloc:  
+dyn.alloc:
   %size = call i32 @llvm.coro.size.i32()
   %alloc = call i8* @malloc(i32 %size)
   br label %begin
@@ -17,7 +17,7 @@ begin:
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %phi)
   call void @print(i32 0)
   %0 = call i8 @llvm.coro.suspend(token none, i1 false)
-  switch i8 %0, label %suspend [i8 0, label %resume 
+  switch i8 %0, label %suspend [i8 0, label %resume
                                 i8 1, label %cleanup]
 resume:
   call void @print(i32 1)
@@ -28,16 +28,22 @@ cleanup:
   call void @free(i8* %mem)
   br label %suspend
 suspend:
-  call i1 @llvm.coro.end(i8* %hdl, i1 0)  
+  call i1 @llvm.coro.end(i8* %hdl, i1 0)
   ret i8* %hdl
 }
 
 ; CHECK-LABEL: @f(
+; CHECK: %[[COROID:.+]] = call token @llvm.coro.id(
 ; CHECK: call i8* @malloc
-; CHECK: @llvm.coro.begin(token %id, i8* %phi)
-; CHECK: store void (%f.Frame*)* @f.resume, void (%f.Frame*)** %resume.addr
-; CHECK: %[[SEL:.+]] = select i1 %need.alloc, void (%f.Frame*)* @f.destroy, void (%f.Frame*)* @f.cleanup
-; CHECK: store void (%f.Frame*)* %[[SEL]], void (%f.Frame*)** %destroy.addr
+
+; CHECK: %[[RESFN:.+]] = call i8* @llvm.coro.subfn.addr.from.beg(token %[[COROID]], i8 0)
+; CHECK: %[[RESBIT:.+]] = bitcast i8* %[[RESFN]] to void (%f.Frame*)*
+; CHECK: store void (%f.Frame*)* %[[RESBIT]], void (%f.Frame*)** %resume.addr
+
+; CHECK: %[[DESFN:.+]] = call i8* @llvm.coro.subfn.addr.from.beg(token %[[COROID]], i8 1)
+; CHECK: %[[DESBIT:.+]] = bitcast i8* %[[DESFN]] to void (%f.Frame*)*
+; CHECK: store void (%f.Frame*)* %[[DESBIT]], void (%f.Frame*)** %destroy.addr
+
 ; CHECK: call void @print(i32 0)
 ; CHECK-NOT: call void @print(i32 1)
 ; CHECK-NOT: call void @free(

@@ -811,9 +811,8 @@ def int_coro_promise : Intrinsic<[llvm_ptr_ty],
 
 // Coroutine Lowering Intrinsics. Used internally by coroutine passes.
 
-def int_coro_subfn_addr_from_beg : Intrinsic<[llvm_ptr_ty], [llvm_ptr_ty, llvm_i8_ty],
-                                    [IntrReadMem, IntrArgMemOnly, ReadOnly<0>,
-                                     NoCapture<0>]>;
+def int_coro_subfn_addr_from_beg : Intrinsic<[llvm_ptr_ty], [llvm_token_ty, llvm_i8_ty],
+                                    [IntrNoMem]>;
 
 def int_coro_subfn_addr : Intrinsic<[llvm_ptr_ty], [llvm_ptr_ty, llvm_i8_ty, llvm_ptr_ty, llvm_token_ty],
                                     [IntrReadMem, IntrArgMemOnly, ReadOnly<0>,

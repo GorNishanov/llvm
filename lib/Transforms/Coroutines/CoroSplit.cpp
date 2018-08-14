@@ -414,6 +414,43 @@ static void setCoroInfo(Function &F, CoroBeginInst *CoroBegin,
   CoroBegin->getId()->setInfo(BC);
 }
 
+static Value *makeSubFromBeginFnCall(IRBuilder<> &Builder, coro::Shape &Shape,
+                                     Function *ResumeFn, int Index) {
+  auto *CB = Shape.CoroBegin;
+  auto &M = *ResumeFn->getParent();
+  LLVMContext& Context = M.getContext();
+
+  auto *IndexVal = ConstantInt::get(Type::getInt8Ty(Context), Index);
+  auto *Fn = Intrinsic::getDeclaration(&M, Intrinsic::coro_subfn_addr_from_beg);
+
+  assert(Index >= 0 &&
+         Index < 2 &&
+         "makeSubFnFromBeginCall: Index value out of range");
+  auto *Call = Builder.CreateCall(Fn, {CB->getId(), IndexVal});
+
+  auto *ResumeFnType = ResumeFn->getType();
+  auto *Bitcast = Builder.CreateBitCast(Call, ResumeFnType);
+  return Bitcast;
+}
+
+// Store addresses of Resume/Destroy/Cleanup functions in the coroutine frame.
+static void updateCoroFrame(coro::Shape &Shape, Function *ResumeFn) {
+  IRBuilder<> Builder(Shape.FramePtr->getNextNode());
+  auto *ResumeAddr = Builder.CreateConstInBoundsGEP2_32(
+      Shape.FrameTy, Shape.FramePtr, 0, coro::Shape::ResumeField,
+      "resume.addr");
+
+  auto *ResumeFnAddr = makeSubFromBeginFnCall(Builder, Shape, ResumeFn, 0);
+  Builder.CreateStore(ResumeFnAddr, ResumeAddr);
+
+  auto *DestroyAddr = Builder.CreateConstInBoundsGEP2_32(
+      Shape.FrameTy, Shape.FramePtr, 0, coro::Shape::DestroyField,
+      "destroy.addr");
+  auto *DestroyFnAddr = makeSubFromBeginFnCall(Builder, Shape, ResumeFn, 1);
+  Builder.CreateStore(DestroyFnAddr, DestroyAddr);
+}
+
+#if 0
 // Store addresses of Resume/Destroy/Cleanup functions in the coroutine frame.
 static void updateCoroFrame(coro::Shape &Shape, Function *ResumeFn,
                             Function *DestroyFn, Function *CleanupFn) {
@@ -437,6 +474,7 @@ static void updateCoroFrame(coro::Shape &Shape, Function *ResumeFn,
       "destroy.addr");
   Builder.CreateStore(DestroyOrCleanupFn, DestroyAddr);
 }
+#endif
 
 static void postSplitCleanup(Function &F) {
   removeUnreachableBlocks(F);
@@ -764,7 +802,7 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   addMustTailToCoroResumes(*ResumeClone);
 
   // Store addresses resume/destroy/cleanup functions in the coroutine frame.
-  updateCoroFrame(Shape, ResumeClone, DestroyClone, CleanupClone);
+  updateCoroFrame(Shape, ResumeClone); //, DestroyClone, CleanupClone);
 
   // Create a constant array referring to resume/destroy/clone functions pointed
   // by the last argument of @llvm.coro.info, so that CoroElide pass can

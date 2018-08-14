@@ -4,12 +4,19 @@
 define i8* @f(i32 %n) {
 entry:
   %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
+  br i1 %need.dyn.alloc, label %dyn.alloc, label %coro.begin
+dyn.alloc:
   %size = call i32 @llvm.coro.size.i32()
   %alloc = call i8* @malloc(i32 %size)
-  %hdl = call noalias i8* @llvm.coro.begin(token %id, i8* %alloc)
+  br label %coro.begin
+coro.begin:
+  %phi = phi i8* [ null, %entry ], [ %alloc, %dyn.alloc ]
+  %hdl = call noalias i8* @llvm.coro.begin(token %id, i8* %phi)
   br label %while.cond
+
 while.cond:
-  %n.val = phi i32 [ %n, %entry ], [ %dec, %while.body ]
+  %n.val = phi i32 [ %n, %coro.begin ], [ %dec, %while.body ]
   %cmp = icmp sgt i32 %n.val, 0
   br i1 %cmp, label %while.body, label %while.end
 
@@ -23,7 +30,7 @@ while.end:
   %s.final = call i8 @llvm.coro.suspend(token none, i1 true)
   switch i8 %s.final, label %suspend [i8 0, label %trap
                                       i8 1, label %cleanup]
-trap: 
+trap:
   call void @llvm.trap()
   unreachable
 cleanup:
@@ -41,6 +48,7 @@ declare void @llvm.trap()
 declare void @free(i8* nocapture)
 
 declare token @llvm.coro.id( i32, i8*, i8*, i8*)
+declare i1 @llvm.coro.alloc(token)
 declare i32 @llvm.coro.size.i32()
 declare i8* @llvm.coro.begin(token, i8*)
 declare token @llvm.coro.save(i8*)

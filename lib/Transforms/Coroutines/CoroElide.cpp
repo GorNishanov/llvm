@@ -32,6 +32,7 @@ struct Lowerer : coro::LowererBase {
   SmallVector<CoroSubFnInst *, 4> ResumeAddr;
   SmallVector<CoroSubFnInst *, 4> DestroyAddr;
   SmallVector<CoroFreeInst *, 1> CoroFrees;
+  SmallVector<CoroSubFromBegInst *, 2> CoroSubFromBeg;
 
   Lowerer(Module &M) : LowererBase(M) {}
 
@@ -63,6 +64,34 @@ static void replaceWithConstant(Constant *Value,
   // Now the value type matches the type of the intrinsic. Replace them all!
   for (CoroSubFnInst *I : Users)
     replaceAndRecursivelySimplify(I, Value);
+}
+
+// Go through the list of coro.subfn.addr intrinsics and replace them with the
+// provided constant.
+static void replaceWithConstants(Constant *Resume, Constant *Destroy,
+                                SmallVectorImpl<CoroSubFromBegInst *> &Users) {
+  if (Users.empty())
+    return;
+
+  // See if we need to bitcast the constant to match the type of the intrinsic
+  // being replaced. Note: All coro.subfn.addr intrinsics return the same type,
+  // so we only need to examine the type of the first one in the list.
+  Type *IntrTy = Users.front()->getType();
+  Type *ValueTy = Resume->getType();
+  if (ValueTy != IntrTy) {
+    // May need to tweak the function type to match the type expected at the
+    // use site.
+    assert(ValueTy->isPointerTy() && IntrTy->isPointerTy());
+    Resume = ConstantExpr::getBitCast(Resume, IntrTy);
+    Destroy = ConstantExpr::getBitCast(Destroy, IntrTy);
+  }
+
+  // Now the value type matches the type of the intrinsic. Replace them all!
+  for (CoroSubFromBegInst *I : Users) {
+    auto *Value = (I->getIndex() == CoroSubFromBegInst::ResumeKind::ResumeIndex)
+      ? Resume : Destroy;
+    replaceAndRecursivelySimplify(I, Value);
+  }
 }
 
 // See if any operand of the call instruction references the coroutine frame.
@@ -195,6 +224,7 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
   CoroFrees.clear();
   ResumeAddr.clear();
   DestroyAddr.clear();
+  CoroSubFromBeg.clear();
 
   // Collect all coro.begin and coro.allocs associated with this coro.id.
   for (User *U : CoroId->users()) {
@@ -204,6 +234,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
       CoroAllocs.push_back(CA);
     else if (auto *CF = dyn_cast<CoroFreeInst>(U))
       CoroFrees.push_back(CF);
+    else if (auto *FB = dyn_cast<CoroSubFromBegInst>(U))
+      CoroSubFromBeg.push_back(FB);
   }
 
   // Collect all coro.subfn.addrs associated with coro.begin.
@@ -242,6 +274,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
       ShouldElide ? CoroSubFnInst::CleanupIndex : CoroSubFnInst::DestroyIndex);
 
   replaceWithConstant(DestroyAddrConstant, DestroyAddr);
+
+  replaceWithConstants(ResumeAddrConstant, DestroyAddrConstant, CoroSubFromBeg);
 
   if (ShouldElide) {
     auto *FrameTy = getFrameType(cast<Function>(ResumeAddrConstant));
