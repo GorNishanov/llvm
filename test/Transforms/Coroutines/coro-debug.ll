@@ -13,7 +13,7 @@ entry:
   store i32 %x, i32* %x.addr, align 4
   call void @llvm.dbg.declare(metadata i32* %x.addr, metadata !12, metadata !13), !dbg !14
   call void @llvm.dbg.declare(metadata i8** %coro_hdl, metadata !15, metadata !13), !dbg !16
-  %0 = call token @llvm.coro.id(i32 0, i8* null, i8* bitcast (i8* (i32)* @f to i8*), i8* null), !dbg !16
+  %0 = call token @llvm.coro.id(i32 0, i8* null, i8* bitcast (i8* (i32)* @f to i8*), i8* null, token none), !dbg !16
   %1 = call i64 @llvm.coro.size.i64(), !dbg !16
   %call = call i8* @malloc(i64 %1), !dbg !16
   %2 = call i8* @llvm.coro.begin(token %0, i8* %call) #7, !dbg !16
@@ -57,7 +57,7 @@ coro_Suspend:                                     ; preds = %coro_Cleanup, %sw.d
 declare void @llvm.dbg.declare(metadata, metadata, metadata) #1
 
 ; Function Attrs: argmemonly nounwind readonly
-declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*) #2
+declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*, token) #2
 
 declare i8* @malloc(i64) #3
 

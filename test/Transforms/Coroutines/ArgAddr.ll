@@ -4,7 +4,7 @@
 
 define nonnull i8* @f(i32 %n) {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null);
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none);
   %n.addr = alloca i32
   store i32 %n, i32* %n.addr ; this needs to go after coro.begin
   %0 = tail call i32 @llvm.coro.size.i32()
@@ -56,7 +56,7 @@ declare void @free(i8*)
 declare void @print(i32)
 declare void @ctor(i8* nocapture readonly)
 
-declare token @llvm.coro.id(i32, i8*, i8*, i8*)
+declare token @llvm.coro.id(i32, i8*, i8*, i8*, token)
 declare i32 @llvm.coro.size.i32()
 declare i8* @llvm.coro.begin(token, i8*)
 declare i8 @llvm.coro.suspend(token, i1)

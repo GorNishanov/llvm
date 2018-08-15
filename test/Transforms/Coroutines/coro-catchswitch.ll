@@ -7,7 +7,7 @@ target triple = "i686-pc-windows-msvc"
 ; CHECK-LABEL: define void @f(
 define void @f(i1 %cond) "coroutine.presplit"="1" personality i32 0 {
 entry:
-  %id = call token @llvm.coro.id(i32 8, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 8, i8* null, i8* null, i8* null, token none)
   %size = call i32 @llvm.coro.size.i32()
   %alloc = call i8* @malloc(i32 %size)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %alloc)
@@ -63,7 +63,7 @@ cleanuppad:
 }
 
 ; Function Attrs: argmemonly nounwind readonly
-declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*) #1
+declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*, token) #1
 
 ; Function Attrs: nounwind
 declare i1 @llvm.coro.alloc(token) #2

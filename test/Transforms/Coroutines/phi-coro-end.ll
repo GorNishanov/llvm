@@ -3,7 +3,7 @@
 
 define i8* @f(i32 %n) {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %size = call i32 @llvm.coro.size.i32()
   %alloc = call i8* @malloc(i32 %size)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %alloc)
@@ -17,7 +17,7 @@ cleanup:
 
 suspend:
   %r = phi i32 [%n, %entry], [1, %cleanup]
-  call i1 @llvm.coro.end(i8* %hdl, i1 false)  
+  call i1 @llvm.coro.end(i8* %hdl, i1 false)
   call void @print(i32 %r)
   ret i8* %hdl
 }
@@ -38,10 +38,10 @@ declare i8* @llvm.coro.free(token, i8*)
 declare i8  @llvm.coro.suspend(token, i1)
 declare void @llvm.coro.resume(i8*)
 declare void @llvm.coro.destroy(i8*)
-  
-declare token @llvm.coro.id(i32, i8*, i8*, i8*)
+
+declare token @llvm.coro.id(i32, i8*, i8*, i8*, token)
 declare i8* @llvm.coro.begin(token, i8*)
-declare i1 @llvm.coro.end(i8*, i1) 
+declare i1 @llvm.coro.end(i8*, i1)
 
 declare noalias i8* @malloc(i32)
 declare void @print(i32)

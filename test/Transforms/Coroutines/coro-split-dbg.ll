@@ -13,7 +13,7 @@ declare void @bar(...) local_unnamed_addr #2
 ; Function Attrs: nounwind uwtable
 define i8* @f() #3 !dbg !16 {
 entry:
-  %0 = tail call token @llvm.coro.id(i32 0, i8* null, i8* bitcast (i8* ()* @f to i8*), i8* null), !dbg !26
+  %0 = tail call token @llvm.coro.id(i32 0, i8* null, i8* bitcast (i8* ()* @f to i8*), i8* null, token none), !dbg !26
   %1 = tail call i64 @llvm.coro.size.i64(), !dbg !26
   %call = tail call i8* @malloc(i64 %1), !dbg !26
   %2 = tail call i8* @llvm.coro.begin(token %0, i8* %call) #9, !dbg !26
@@ -46,7 +46,7 @@ coro_Suspend:                                     ; preds = %for.cond, %if.then,
 declare void @llvm.lifetime.start.p0i8(i64, i8* nocapture) #4
 
 ; Function Attrs: argmemonly nounwind readonly
-declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*) #5
+declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*, token) #5
 
 ; Function Attrs: nounwind
 declare noalias i8* @malloc(i64) local_unnamed_addr #6

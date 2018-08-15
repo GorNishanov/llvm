@@ -3,7 +3,7 @@
 
 define i8* @f(i32 %n) {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %size = call i32 @llvm.coro.size.i32()
   %alloc = call i8* @malloc(i32 %size)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %alloc)
@@ -13,7 +13,7 @@ loop:
   %n.val = phi i32 [ %n, %entry ], [ %inc, %resume ]
   call void @print(i32 %n.val)
   %0 = call i8 @llvm.coro.suspend(token none, i1 false)
-  switch i8 %0, label %suspend [i8 0, label %resume 
+  switch i8 %0, label %suspend [i8 0, label %resume
                                 i8 1, label %cleanup]
 resume:
   %inc = add i32 %n.val, 1
@@ -24,7 +24,7 @@ cleanup:
   call void @free(i8* %mem)
   br label %suspend
 suspend:
-  call i1 @llvm.coro.end(i8* %hdl, i1 0)  
+  call i1 @llvm.coro.end(i8* %hdl, i1 0)
   ret i8* %hdl
 }
 
@@ -43,7 +43,7 @@ entry:
 ; CHECK:      ret i32 0
 }
 
-declare token @llvm.coro.id(i32, i8*, i8*, i8*)
+declare token @llvm.coro.id(i32, i8*, i8*, i8*, token)
 declare i8* @llvm.coro.alloc(token)
 declare i8* @llvm.coro.free(token, i8*)
 declare i32 @llvm.coro.size.i32()

@@ -24,7 +24,7 @@ define i8* @f() {
 entry:
   %id = call token @llvm.coro.id(i32 0, i8* null,
                           i8* bitcast (i8*()* @f to i8*),
-                          i8* bitcast ([2 x void (i8*)*]* @f.resumers to i8*))
+                          i8* bitcast ([2 x void (i8*)*]* @f.resumers to i8*), token none)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* null)
   ret i8* %hdl
 }
@@ -70,7 +70,7 @@ ehcleanup:
 ; no devirtualization here, since coro.begin info parameter is null
 define void @no_devirt_info_null() {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* null)
 
 ; CHECK: call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0, i8* null, token none)
@@ -106,7 +106,7 @@ entry:
   ret void
 }
 
-declare token @llvm.coro.id(i32, i8*, i8*, i8*)
+declare token @llvm.coro.id(i32, i8*, i8*, i8*, token)
 declare i8* @llvm.coro.begin(token, i8*)
 declare i8* @llvm.coro.frame()
 declare i8* @llvm.coro.subfn.addr(i8*, i8, i8*, token)

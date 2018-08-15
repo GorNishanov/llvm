@@ -3,7 +3,7 @@
 
 define i8* @f(i32 %n) {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
   br i1 %need.dyn.alloc, label %dyn.alloc, label %coro.begin
 dyn.alloc:
@@ -47,7 +47,7 @@ declare void @print(i32)
 declare void @llvm.trap()
 declare void @free(i8* nocapture)
 
-declare token @llvm.coro.id( i32, i8*, i8*, i8*)
+declare token @llvm.coro.id( i32, i8*, i8*, i8*, token)
 declare i1 @llvm.coro.alloc(token)
 declare i32 @llvm.coro.size.i32()
 declare i8* @llvm.coro.begin(token, i8*)

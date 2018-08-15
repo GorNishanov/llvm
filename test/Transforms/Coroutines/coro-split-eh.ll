@@ -4,7 +4,7 @@
 
 define i8* @f(i1 %val) "coroutine.presplit"="1" personality i32 3 {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* null)
   call void @print(i32 0)
   br i1 %val, label %resume, label %susp
@@ -55,7 +55,7 @@ eh.resume:
 
 define i8* @f2(i1 %val) "coroutine.presplit"="1" personality i32 4 {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* null)
   call void @print(i32 0)
   br i1 %val, label %resume, label %susp
@@ -134,7 +134,7 @@ declare i8  @llvm.coro.suspend(token, i1)
 declare void @llvm.coro.resume(i8*)
 declare void @llvm.coro.destroy(i8*)
 
-declare token @llvm.coro.id(i32, i8*, i8*, i8*)
+declare token @llvm.coro.id(i32, i8*, i8*, i8*, token)
 declare i8* @llvm.coro.alloc(token)
 declare i8* @llvm.coro.begin(token, i8*)
 declare i1 @llvm.coro.end(i8*, i1) 

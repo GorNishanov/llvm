@@ -7,7 +7,7 @@ target triple = "x86_64-unknown-linux-gnu"
 ; CHECK-LABEL: define internal fastcc void @f.resume(
 define void @f(i1 %cond) "coroutine.presplit"="1" personality i32 0 {
 entry:
-  %id = call token @llvm.coro.id(i32 16, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 16, i8* null, i8* null, i8* null, token none)
   %size = tail call i64 @llvm.coro.size.i64()
   %alloc = call i8* @malloc(i64 %size)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %alloc)
@@ -75,7 +75,7 @@ unreach:
 ; CHECK-LABEL: define internal fastcc void @g.resume(
 define void @g(i1 %cond, i32 %x, i32 %y) "coroutine.presplit"="1" personality i32 0 {
 entry:
-  %id = call token @llvm.coro.id(i32 16, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 16, i8* null, i8* null, i8* null, token none)
   %size = tail call i64 @llvm.coro.size.i64()
   %alloc = call i8* @malloc(i64 %size)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %alloc)
@@ -137,7 +137,7 @@ unreach:
 ; CHECK-LABEL: define internal fastcc void @h.resume(
 define void @h(i1 %cond, i32 %x, i32 %y) "coroutine.presplit"="1" personality i32 0 {
 entry:
-  %id = call token @llvm.coro.id(i32 16, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 16, i8* null, i8* null, i8* null, token none)
   %size = tail call i64 @llvm.coro.size.i64()
   %alloc = call i8* @malloc(i64 %size)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %alloc)
@@ -194,7 +194,7 @@ coro.ret:
 }
 
 ; Function Attrs: argmemonly nounwind readonly
-declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*)
+declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*, token)
 declare noalias i8* @malloc(i64)
 declare i64 @llvm.coro.size.i64()
 declare i8* @llvm.coro.begin(token, i8* writeonly)

@@ -4,7 +4,7 @@
 
 define void @f() "coroutine.presplit"="1" {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %alloc = call i8* @malloc(i64 16) #3
   %vFrame = call noalias nonnull i8* @llvm.coro.begin(token %id, i8* %alloc)
 
@@ -47,7 +47,7 @@ exit:
 ; CHECK-NEXT: musttail call fastcc void %[[pv2]](i8* null)
 ; CHECK-NEXT: ret void
 
-declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*)
+declare token @llvm.coro.id(i32, i8* readnone, i8* nocapture readonly, i8*, token)
 declare i1 @llvm.coro.alloc(token) #3
 declare i64 @llvm.coro.size.i64() #5
 declare i8* @llvm.coro.begin(token, i8* writeonly) #3

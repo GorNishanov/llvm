@@ -10,7 +10,7 @@
 ;
 define void @no_suspends(i32 %n) {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
   br i1 %need.dyn.alloc, label %dyn.alloc, label %coro.begin
 dyn.alloc:
@@ -37,7 +37,7 @@ suspend:
 }
 
 ; SimplifySuspendPoint will detect that coro.resume resumes itself and will
-; replace suspend with a jump to %resume label turning it into no-suspend 
+; replace suspend with a jump to %resume label turning it into no-suspend
 ; coroutine.
 ;
 ; CHECK-LABEL: define void @simplify_resume(
@@ -47,7 +47,7 @@ suspend:
 ;
 define void @simplify_resume() {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
   br i1 %need.dyn.alloc, label %dyn.alloc, label %coro.begin
 dyn.alloc:
@@ -82,7 +82,7 @@ suspend:
 }
 
 ; SimplifySuspendPoint will detect that coroutine destroys itself and will
-; replace suspend with a jump to %cleanup label turning it into no-suspend 
+; replace suspend with a jump to %cleanup label turning it into no-suspend
 ; coroutine.
 ;
 ; CHECK-LABEL: define void @simplify_destroy(
@@ -92,7 +92,7 @@ suspend:
 ;
 define void @simplify_destroy() {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
   br i1 %need.dyn.alloc, label %dyn.alloc, label %coro.begin
 dyn.alloc:
@@ -136,7 +136,7 @@ suspend:
 
 define void @cannot_simplify() {
 entry:
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
   br i1 %need.dyn.alloc, label %dyn.alloc, label %coro.begin
 dyn.alloc:
@@ -176,7 +176,7 @@ declare void @free(i8*)
 declare void @print(i32)
 declare void @foo()
 
-declare token @llvm.coro.id(i32, i8*, i8*, i8*)
+declare token @llvm.coro.id(i32, i8*, i8*, i8*, token)
 declare i1 @llvm.coro.alloc(token)
 declare i32 @llvm.coro.size.i32()
 declare i8* @llvm.coro.begin(token, i8*)

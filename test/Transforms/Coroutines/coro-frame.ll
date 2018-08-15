@@ -6,7 +6,7 @@ entry:
   %this.addr = alloca i64
   store i64 %this, i64* %this.addr
   %this1 = load i64, i64* %this.addr
-  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null, token none)
   %size = call i32 @llvm.coro.size.i32()
   %alloc = call i8* @malloc(i32 %size)
   %hdl = call i8* @llvm.coro.begin(token %id, i8* %alloc)
@@ -55,7 +55,7 @@ declare i8  @llvm.coro.suspend(token, i1)
 declare void @llvm.coro.resume(i8*)
 declare void @llvm.coro.destroy(i8*)
 
-declare token @llvm.coro.id(i32, i8*, i8*, i8*)
+declare token @llvm.coro.id(i32, i8*, i8*, i8*, token)
 declare i1 @llvm.coro.alloc(token)
 declare i8* @llvm.coro.begin(token, i8*)
 declare i1 @llvm.coro.end(i8*, i1)
