@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CoroInternal.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LegacyPassManager.h"
@@ -73,6 +74,54 @@ static void lowerGetCcAddr(IRBuilder<> &Builder, IntrinsicInst *II) {
   II->replaceAllUsesWith(Load);
 }
 
+//llvm.coro.subfn.addr.from.beg
+
+static void replaceWithConstants(Constant *Resume, Constant *Destroy,
+                                SmallVectorImpl<CoroSubFromBegInst *> &Users) {
+  if (Users.empty())
+    return;
+
+  // See if we need to bitcast the constant to match the type of the intrinsic
+  // being replaced. Note: All coro.subfn.addr intrinsics return the same type,
+  // so we only need to examine the type of the first one in the list.
+  Type *IntrTy = Users.front()->getType();
+  Type *ValueTy = Resume->getType();
+  if (ValueTy != IntrTy) {
+    // May need to tweak the function type to match the type expected at the
+    // use site.
+    assert(ValueTy->isPointerTy() && IntrTy->isPointerTy());
+    Resume = ConstantExpr::getBitCast(Resume, IntrTy);
+    Destroy = ConstantExpr::getBitCast(Destroy, IntrTy);
+  }
+
+  // Now the value type matches the type of the intrinsic. Replace them all!
+  for (CoroSubFromBegInst *I : Users) {
+    auto *Value = (I->getIndex() == CoroSubFromBegInst::ResumeKind::ResumeIndex)
+      ? Resume : Destroy;
+    replaceAndRecursivelySimplify(I, Value);
+  }
+}
+
+static void lowerGetAddrFromBeg(CoroIdInst* CoroId) {
+  SmallVector<CoroSubFromBegInst *, 2> SB;
+  for (auto *User: CoroId->users())
+    if (auto *SBI = dyn_cast<CoroSubFromBegInst>(User))
+      SB.push_back(SBI);
+
+  if (SB.empty())
+    return;
+
+  ConstantArray *Resumers = CoroId->getInfo().Resumers;
+  assert(Resumers && "PostSplit coro.id Info argument must refer to an array"
+                     "of coroutine subfunctions");
+  auto *ResumeAddrConstant =
+      ConstantExpr::getExtractValue(Resumers, CoroSubFnInst::ResumeIndex);
+  auto *DestroyAddrConstant =
+      ConstantExpr::getExtractValue(Resumers, CoroSubFnInst::DestroyIndex);
+
+  replaceWithConstants(ResumeAddrConstant, DestroyAddrConstant, SB);
+}
+
 bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
   bool Changed = false;
 
@@ -92,6 +141,7 @@ bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
         II->replaceAllUsesWith(ConstantInt::getTrue(Context));
         break;
       case Intrinsic::coro_id:
+        lowerGetAddrFromBeg(cast<CoroIdInst>(II));
         II->replaceAllUsesWith(ConstantTokenNone::get(Context));
         break;
       case Intrinsic::coro_subfn_addr:
@@ -133,7 +183,8 @@ struct CoroCleanup : FunctionPass {
   bool doInitialization(Module &M) override {
     if (coro::declaresIntrinsics(M, {"llvm.coro.alloc", "llvm.coro.begin",
                                      "llvm.coro.subfn.addr", "llvm.coro.free",
-                                     "llvm.coro.id"}))
+                                     "llvm.coro.id",
+                                     "llvm.coro.subfn.addr.from.beg"}))
       L = llvm::make_unique<Lowerer>(M);
     return false;
   }

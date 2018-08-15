@@ -17,6 +17,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
 
@@ -51,9 +52,25 @@ public:
 // to coro.subfn.addr with an appropriate function address.
 void Lowerer::lowerResumeOrDestroy(CallSite CS, CoroSubFnInst::ResumeKind Index,
                                    Value *Continuation) {
-  Value *ResumeAddr = makeSubFnCall(CS.getArgOperand(0), Index, Continuation,
-                                    CS.getInstruction());
-  CS.setCalledFunction(ResumeAddr);
+  Value *FramePtr = CS.getArgOperand(0);
+  Instruction *Instr = CS.getInstruction();
+  Value *ResumeAddr = makeSubFnCall(FramePtr, Index, Continuation, Instr);
+
+  if (Continuation) {
+    Instruction *Replacement = nullptr;
+    if (auto *Invoke = dyn_cast<InvokeInst>(Instr))
+      Replacement =
+          InvokeInst::Create(ResumeAddr, Invoke->getNormalDest(),
+                             Invoke->getUnwindDest(), FramePtr);
+    else
+      Replacement = CallInst::Create(ResumeAddr, FramePtr);
+
+    ReplaceInstWithInst(Instr, Replacement);
+    CS = CallSite(Replacement);
+  }
+  else {
+    CS.setCalledFunction(ResumeAddr);
+  }
   CS.setCallingConv(CallingConv::Fast);
 }
 
