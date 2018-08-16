@@ -427,6 +427,7 @@ static Value *makeSubFromBeginFnCall(IRBuilder<> &Builder, coro::Shape &Shape,
          Index < 2 &&
          "makeSubFnFromBeginCall: Index value out of range");
   auto *Call = Builder.CreateCall(Fn, {CB->getId(), IndexVal});
+  Call->addAttribute(AttributeList::ReturnIndex, Attribute::NonNull);
 
   auto *ResumeFnType = ResumeFn->getType();
   auto *Bitcast = Builder.CreateBitCast(Call, ResumeFnType);

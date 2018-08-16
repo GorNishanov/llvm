@@ -36,11 +36,11 @@ suspend:
 ; CHECK: %[[COROID:.+]] = call token @llvm.coro.id(
 ; CHECK: call i8* @malloc
 
-; CHECK: %[[RESFN:.+]] = call i8* @llvm.coro.subfn.addr.from.beg(token %[[COROID]], i8 0)
+; CHECK: %[[RESFN:.+]] = call nonnull i8* @llvm.coro.subfn.addr.from.beg(token %[[COROID]], i8 0)
 ; CHECK: %[[RESBIT:.+]] = bitcast i8* %[[RESFN]] to void (%f.Frame*)*
 ; CHECK: store void (%f.Frame*)* %[[RESBIT]], void (%f.Frame*)** %resume.addr
 
-; CHECK: %[[DESFN:.+]] = call i8* @llvm.coro.subfn.addr.from.beg(token %[[COROID]], i8 1)
+; CHECK: %[[DESFN:.+]] = call nonnull i8* @llvm.coro.subfn.addr.from.beg(token %[[COROID]], i8 1)
 ; CHECK: %[[DESBIT:.+]] = bitcast i8* %[[DESFN]] to void (%f.Frame*)*
 ; CHECK: store void (%f.Frame*)* %[[DESBIT]], void (%f.Frame*)** %destroy.addr
 
