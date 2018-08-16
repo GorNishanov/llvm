@@ -82,6 +82,7 @@ public:
   enum ResumeKind {
     ResumeIndex,
     DestroyIndex,
+    CleanupIndex,
     IndexLast,
     IndexFirst = ResumeIndex
   };
@@ -95,6 +96,13 @@ public:
 
   ConstantInt *getRawIndex() const {
     return cast<ConstantInt>(getArgOperand(IndexArg));
+  }
+
+  void setIndex(ResumeKind Value) {
+    auto &Context = getContext();
+    IntegerType *Int8Ty = Type::getInt8Ty(Context);
+    auto *C = ConstantInt::getSigned(Int8Ty, static_cast<int64_t>(Value));
+    setArgOperand(IndexArg, C);
   }
 
   // Methods to support type inquiry through isa, cast, and dyn_cast:
@@ -120,7 +128,7 @@ public:
 
 /// This represents the llvm.coro.alloc instruction.
 class LLVM_LIBRARY_VISIBILITY CoroIdInst : public IntrinsicInst {
-  enum { AlignArg, PromiseArg, CoroutineArg, InfoArg };
+  enum { AlignArg, PromiseArg, CoroutineArg, InfoArg, CallerIdArg };
 
 public:
   CoroAllocInst *getCoroAlloc() {
@@ -202,6 +210,15 @@ public:
   }
 
   void setInfo(Constant *C) { setArgOperand(InfoArg, C); }
+
+  CoroIdInst *getCallerId() {
+    return dyn_cast<CoroIdInst>(getArgOperand(CallerIdArg));
+  }
+
+  void setCallerId(CoroIdInst *CallerId) {
+    assert(getCallerId() == nullptr && "CalledId is already assigned");
+    setArgOperand(CallerIdArg, CallerId);
+  }
 
   Function *getCoroutine() const {
     return cast<Function>(getArgOperand(CoroutineArg)->stripPointerCasts());

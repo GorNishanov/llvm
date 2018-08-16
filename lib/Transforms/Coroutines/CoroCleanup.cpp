@@ -74,34 +74,6 @@ static void lowerGetCcAddr(IRBuilder<> &Builder, IntrinsicInst *II) {
   II->replaceAllUsesWith(Load);
 }
 
-//llvm.coro.subfn.addr.from.beg
-
-static void replaceWithConstants(Constant *Resume, Constant *Destroy,
-                                SmallVectorImpl<CoroSubFromBegInst *> &Users) {
-  if (Users.empty())
-    return;
-
-  // See if we need to bitcast the constant to match the type of the intrinsic
-  // being replaced. Note: All coro.subfn.addr intrinsics return the same type,
-  // so we only need to examine the type of the first one in the list.
-  Type *IntrTy = Users.front()->getType();
-  Type *ValueTy = Resume->getType();
-  if (ValueTy != IntrTy) {
-    // May need to tweak the function type to match the type expected at the
-    // use site.
-    assert(ValueTy->isPointerTy() && IntrTy->isPointerTy());
-    Resume = ConstantExpr::getBitCast(Resume, IntrTy);
-    Destroy = ConstantExpr::getBitCast(Destroy, IntrTy);
-  }
-
-  // Now the value type matches the type of the intrinsic. Replace them all!
-  for (CoroSubFromBegInst *I : Users) {
-    auto *Value = (I->getIndex() == CoroSubFromBegInst::ResumeKind::ResumeIndex)
-      ? Resume : Destroy;
-    replaceAndRecursivelySimplify(I, Value);
-  }
-}
-
 static void lowerGetAddrFromBeg(CoroIdInst* CoroId) {
   SmallVector<CoroSubFromBegInst *, 2> SB;
   for (auto *User: CoroId->users())
@@ -114,16 +86,39 @@ static void lowerGetAddrFromBeg(CoroIdInst* CoroId) {
   ConstantArray *Resumers = CoroId->getInfo().Resumers;
   assert(Resumers && "PostSplit coro.id Info argument must refer to an array"
                      "of coroutine subfunctions");
-  auto *ResumeAddrConstant =
-      ConstantExpr::getExtractValue(Resumers, CoroSubFnInst::ResumeIndex);
-  auto *DestroyAddrConstant =
-      ConstantExpr::getExtractValue(Resumers, CoroSubFnInst::DestroyIndex);
 
-  replaceWithConstants(ResumeAddrConstant, DestroyAddrConstant, SB);
+  for (CoroSubFromBegInst *I : SB) {
+    auto *Value = ConstantExpr::getExtractValue(Resumers, I->getIndex());
+
+    // See if we need to bitcast the constant to match the type of the intrinsic
+    // being replaced. Note: All coro.subfn.addr intrinsics return the same type,
+    // so we only need to examine the type of the first one in the list.
+    Type *IntrTy = I->getType();
+    Type *ValueTy = Value->getType();
+    if (ValueTy != IntrTy) {
+      assert(ValueTy->isPointerTy() && IntrTy->isPointerTy());
+      Value = ConstantExpr::getBitCast(Value, IntrTy);
+    }
+    replaceAndRecursivelySimplify(I, Value);
+  }
 }
 
 bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
   bool Changed = false;
+
+  SmallPtrSet<CoroIdInst*, 2> CoroIds;
+  for (auto &I: instructions(F))
+    if (auto *CID = dyn_cast<CoroIdInst>(&I))
+      CoroIds.insert(CID);
+
+  for (auto *CID: CoroIds)
+    lowerGetAddrFromBeg(cast<CoroIdInst>(CID));
+
+  for (auto *CID: CoroIds) {
+    CID->replaceAllUsesWith(ConstantTokenNone::get(Context));
+    CID->eraseFromParent();
+    Changed = true;
+  }
 
   for (auto IB = inst_begin(F), E = inst_end(F); IB != E;) {
     Instruction &I = *IB++;
@@ -139,10 +134,6 @@ bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
         break;
       case Intrinsic::coro_alloc:
         II->replaceAllUsesWith(ConstantInt::getTrue(Context));
-        break;
-      case Intrinsic::coro_id:
-        lowerGetAddrFromBeg(cast<CoroIdInst>(II));
-        II->replaceAllUsesWith(ConstantTokenNone::get(Context));
         break;
       case Intrinsic::coro_subfn_addr:
         lowerSubFn(Builder, cast<CoroSubFnInst>(II));

@@ -66,8 +66,6 @@ static void replaceWithConstant(Constant *Value,
     replaceAndRecursivelySimplify(I, Value);
 }
 
-// Go through the list of coro.subfn.addr intrinsics and replace them with the
-// provided constant.
 static void replaceWithConstants(Constant *Resume, Constant *Destroy,
                                 SmallVectorImpl<CoroSubFromBegInst *> &Users) {
   if (Users.empty())
@@ -242,6 +240,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
       CoroSubFromBeg.push_back(FB);
   }
 
+  SmallPtrSet<CoroIdInst*, 1> CoroIdsToLink;
+
   // Collect all coro.subfn.addrs associated with coro.begin.
   // Note, we only devirtualize the calls if their coro.subfn.addr refers to
   // coro.begin directly. If we run into cases where this check is too
@@ -252,6 +252,9 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
         switch (II->getIndex()) {
         case CoroSubFnInst::ResumeIndex:
           ResumeAddr.push_back(II);
+          if (auto *LCB =
+                  dyn_cast_or_null<CoroBeginInst>(II->getContinuation()))
+            CoroIdsToLink.insert(LCB->getId());
           break;
         case CoroSubFnInst::DestroyIndex:
           DestroyAddr.push_back(II);
@@ -285,6 +288,16 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
     auto *FrameTy = getFrameType(cast<Function>(ResumeAddrConstant));
     elideHeapAllocations(CoroId->getFunction(), FrameTy, AA);
     coro::replaceCoroFree(CoroId, /*Elide=*/true);
+
+    assert(CoroIdsToLink.size() <= 1 && "Linking to multiple coro.ids");
+    for (auto *LID: CoroIdsToLink)
+      CoroId->setCallerId(LID);
+
+#if 0 // TODO: Do this at coro split time
+    for (auto *SB: CoroSubFromBeg)
+      if (SB->getIndex() == CoroSubFromBegInst::DestroyIndex)
+        SB->setIndex(CoroSubFromBegInst::CleanupIndex);
+        #endif
   }
 
   return true;
