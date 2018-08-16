@@ -66,6 +66,7 @@ static void replaceWithConstant(Constant *Value,
     replaceAndRecursivelySimplify(I, Value);
 }
 
+#if 0
 static void replaceWithConstants(Constant *Resume, Constant *Destroy,
                                 SmallVectorImpl<CoroSubFromBegInst *> &Users) {
   if (Users.empty())
@@ -91,6 +92,7 @@ static void replaceWithConstants(Constant *Resume, Constant *Destroy,
     replaceAndRecursivelySimplify(I, Value);
   }
 }
+#endif
 
 // See if any operand of the call instruction references the coroutine frame.
 static bool operandReferences(CallInst *CI, AllocaInst *Frame, AAResults &AA) {
@@ -282,7 +284,7 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
 
   replaceWithConstant(DestroyAddrConstant, DestroyAddr);
 
-  replaceWithConstants(ResumeAddrConstant, DestroyAddrConstant, CoroSubFromBeg);
+  //replaceWithConstants(ResumeAddrConstant, DestroyAddrConstant, CoroSubFromBeg);
 
   if (ShouldElide) {
     auto *FrameTy = getFrameType(cast<Function>(ResumeAddrConstant));
@@ -293,11 +295,11 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
     for (auto *LID: CoroIdsToLink)
       CoroId->setCallerId(LID);
 
-#if 0 // TODO: Do this at coro split time
+#if 1 // TODO: Do this at coro split time
     for (auto *SB: CoroSubFromBeg)
       if (SB->getIndex() == CoroSubFromBegInst::DestroyIndex)
         SB->setIndex(CoroSubFromBegInst::CleanupIndex);
-        #endif
+#endif
   }
 
   return true;

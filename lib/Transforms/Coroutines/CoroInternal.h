@@ -49,6 +49,7 @@ void replaceAllCoroFrees(CoroBeginInst *CB, Value *Replacement);
 void replaceCoroFree(CoroIdInst *CoroId, bool Elide);
 void updateCallGraph(Function &Caller, ArrayRef<Function *> Funcs,
                      CallGraph &CG, CallGraphSCC &SCC);
+void lowerGetAddrFromBeg(CoroIdInst* CoroId);
 
 // Keeps data and helper functions for lowering coroutine intrinsics.
 struct LowererBase {

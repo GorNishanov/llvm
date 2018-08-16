@@ -220,6 +220,11 @@ public:
     setArgOperand(CallerIdArg, CallerId);
   }
 
+  void clearCallerId() {
+    assert(getCallerId() != nullptr && "CalledId is not assigned");
+    setArgOperand(CallerIdArg, ConstantTokenNone::get(getContext()));
+  }
+
   Function *getCoroutine() const {
     return cast<Function>(getArgOperand(CoroutineArg)->stripPointerCasts());
   }

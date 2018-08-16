@@ -18,6 +18,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/IRBuilder.h"
@@ -358,3 +359,33 @@ void coro::Shape::buildFrom(Function &F) {
   for (CoroSaveInst *CoroSave : UnusedCoroSaves)
     CoroSave->eraseFromParent();
 }
+
+void coro::lowerGetAddrFromBeg(CoroIdInst* CoroId) {
+  SmallVector<CoroSubFromBegInst *, 2> SB;
+  for (auto *User: CoroId->users())
+    if (auto *SBI = dyn_cast<CoroSubFromBegInst>(User))
+      SB.push_back(SBI);
+
+  if (SB.empty())
+    return;
+
+  ConstantArray *Resumers = CoroId->getInfo().Resumers;
+  assert(Resumers && "PostSplit coro.id Info argument must refer to an array"
+                     "of coroutine subfunctions");
+
+  for (CoroSubFromBegInst *I : SB) {
+    auto *Value = ConstantExpr::getExtractValue(Resumers, I->getIndex());
+
+    // See if we need to bitcast the constant to match the type of the intrinsic
+    // being replaced. Note: All coro.subfn.addr intrinsics return the same type,
+    // so we only need to examine the type of the first one in the list.
+    Type *IntrTy = I->getType();
+    Type *ValueTy = Value->getType();
+    if (ValueTy != IntrTy) {
+      assert(ValueTy->isPointerTy() && IntrTy->isPointerTy());
+      Value = ConstantExpr::getBitCast(Value, IntrTy);
+    }
+    replaceAndRecursivelySimplify(I, Value);
+  }
+}
+

@@ -769,6 +769,16 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   if (!Shape.CoroBegin)
     return;
 
+  SmallPtrSet<CoroIdInst*, 2> CIDs;
+  for (auto *U: Shape.CoroBegin->getId()->users())
+    if (auto *CID = dyn_cast<CoroIdInst>(U))
+      CIDs.insert(CID);
+
+  for (auto *CID: CIDs) {
+      coro::lowerGetAddrFromBeg(cast<CoroIdInst>(CID));
+      CID->clearCallerId();
+  }
+
   simplifySuspendPoints(Shape);
   relocateInstructionBefore(Shape.CoroBegin, F);
   buildCoroutineFrame(F, Shape);
