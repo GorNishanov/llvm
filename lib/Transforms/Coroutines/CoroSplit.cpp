@@ -71,9 +71,71 @@ using namespace llvm;
 
 #define DEBUG_TYPE "coro-split"
 
+static void setCoroInfo(Function &F, CoroIdInst *CoroId,
+                        std::initializer_list<Function *> Fns);
+
+namespace {
+struct ReverseInlineWorker {
+
+  void addSuspendPoint(CoroSaveInst *Save, size_t Index) {
+    SmallVector<Request, 1> Requests;
+
+    for (auto *U : Save->users())
+      if (auto *R = dyn_cast<CoroInlineRequestInst>(U))
+        Requests.emplace_back(R);
+
+    if (!Requests.empty())
+      Entries.emplace_back(Index, Requests);
+  }
+  void prepareInnerClones(Function& Outer);
+  void createResumeClones() {}
+
+private:
+  struct Request {
+    CoroInlineRequestInst *RequestInst;
+    Function *InnerClone = nullptr;
+
+    explicit Request(CoroInlineRequestInst *RI) : RequestInst(RI) {}
+  };
+
+  struct Entry {
+    size_t Index;
+    Function *ResumeClone = nullptr;
+    SmallVector<Request, 1> Requests;
+
+    explicit Entry(size_t Index, SmallVector<Request, 1> &Reqs)
+        : Index(Index), Requests(std::move(Reqs)) {}
+  };
+  SmallVector<Entry, 2> Entries;
+};
+} // namespace
+
+void ReverseInlineWorker::prepareInnerClones(Function& Outer) {
+  for (auto &E: Entries)
+    for (auto &R: E.Requests) {
+      auto *CoroId = R.RequestInst->getId();
+      ConstantArray *Resumers = CoroId->getInfo().Resumers;
+      assert(Resumers && "PostSplit coro.id Info argument must refer to an array"
+                         "of coroutine subfunctions");
+
+      auto *ResumeFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 0));
+      auto *DestroyFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 1));
+      auto *CleanupFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 2));
+
+      ValueToValueMapTy VMap;
+      R.InnerClone = CloneFunction(ResumeFn, VMap);
+      R.InnerClone->setName(ResumeFn->getName() +
+        Twine(".from." + Outer.getName() + ".") + Twine(E.Index));
+
+      // Update CoroId to refer to the clone.
+      setCoroInfo(*R.InnerClone, CoroId, {ResumeFn, DestroyFn, CleanupFn});
+    }
+}
+
 // Create an entry block for a resume function with a switch that will jump to
 // suspend points.
-static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape) {
+static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape,
+                                          ReverseInlineWorker &ReverseInliner) {
   LLVMContext &C = F.getContext();
 
   // resume.entry:
@@ -120,6 +182,7 @@ static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape) {
           FrameTy, FramePtr, 0, coro::Shape::IndexField, "index.addr");
       Builder.CreateStore(IndexVal, GepIndex);
     }
+    ReverseInliner.addSuspendPoint(Save, SuspendIndex);
     Save->replaceAllUsesWith(ConstantTokenNone::get(C));
     Save->eraseFromParent();
 
@@ -395,7 +458,7 @@ static void replaceFrameSize(coro::Shape &Shape) {
 //                    i8* bitcast([2 x void(%f.frame*)*] * @f.resumers to i8*))
 //
 // Assumes that all the functions have the same signature.
-static void setCoroInfo(Function &F, CoroBeginInst *CoroBegin,
+static void setCoroInfo(Function &F, CoroIdInst *CoroId,
                         std::initializer_list<Function *> Fns) {
   SmallVector<Constant *, 4> Args(Fns.begin(), Fns.end());
   assert(!Args.empty());
@@ -411,7 +474,7 @@ static void setCoroInfo(Function &F, CoroBeginInst *CoroBegin,
   // Update coro.begin instruction to refer to this constant.
   LLVMContext &C = F.getContext();
   auto *BC = ConstantExpr::getPointerCast(GV, Type::getInt8PtrTy(C));
-  CoroBegin->getId()->setInfo(BC);
+  CoroId->setInfo(BC);
 }
 
 static Value *makeSubFromBeginFnCall(IRBuilder<> &Builder, coro::Shape &Shape,
@@ -793,10 +856,13 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
     return;
   }
 
-  auto *ResumeEntry = createResumeEntryBlock(F, Shape);
+  ReverseInlineWorker ReverseInliner;
+  auto *ResumeEntry = createResumeEntryBlock(F, Shape, ReverseInliner);
+  ReverseInliner.prepareInnerClones(F);
   auto ResumeClone = createClone(F, ".resume", Shape, ResumeEntry, 0);
   auto DestroyClone = createClone(F, ".destroy", Shape, ResumeEntry, 1);
   auto CleanupClone = createClone(F, ".cleanup", Shape, ResumeEntry, 2);
+  ReverseInliner.createResumeClones();
 
   // createResumeParts(*ResumeClone); // NOT NEEDED YET
 
@@ -816,7 +882,8 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   // Create a constant array referring to resume/destroy/clone functions pointed
   // by the last argument of @llvm.coro.info, so that CoroElide pass can
   // determined correct function to call.
-  setCoroInfo(F, Shape.CoroBegin, {ResumeClone, DestroyClone, CleanupClone});
+  setCoroInfo(F, Shape.CoroBegin->getId(),
+              {ResumeClone, DestroyClone, CleanupClone});
 
   // Update call graph and add the functions we created to the SCC.
   coro::updateCallGraph(F, {ResumeClone, DestroyClone, CleanupClone}, CG, SCC);

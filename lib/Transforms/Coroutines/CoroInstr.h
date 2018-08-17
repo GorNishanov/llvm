@@ -292,8 +292,25 @@ public:
 };
 
 /// This represents the llvm.coro.save instruction.
+class LLVM_LIBRARY_VISIBILITY CoroInlineRequestInst : public IntrinsicInst {
+public:
+  enum { IdArg, SaveArg };
+
+  CoroIdInst *getId() const { return cast<CoroIdInst>(getArgOperand(IdArg)); }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_rinline_request;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.save instruction.
 class LLVM_LIBRARY_VISIBILITY CoroSaveInst : public IntrinsicInst {
 public:
+
   // Methods to support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const IntrinsicInst *I) {
     return I->getIntrinsicID() == Intrinsic::coro_save;
