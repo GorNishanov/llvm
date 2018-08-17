@@ -221,6 +221,30 @@ bool Lowerer::shouldElide(Function *F, DominatorTree &DT) const {
   return ReferencedCoroBegins.size() == CoroBegins.size();
 }
 
+static CoroSaveInst *findSuspendToken(CoroSubFnInst *SB) {
+  Instruction *I = SB->getPrevNode();
+  while (I) {
+    if (auto *CSI = dyn_cast<CoroSaveInst>(I))
+      return CSI;
+    I = I->getPrevNode();
+  }
+  return nullptr;
+}
+
+static void prepareForReverseInlining(CoroIdInst *CoroId,
+                                      SmallVectorImpl<CoroSubFnInst *> &Subs) {
+  if (Subs.empty())
+    return;
+
+  auto &M = *Subs.front()->getFunction()->getParent();
+  auto *Fn = Intrinsic::getDeclaration(&M, Intrinsic::coro_rinline_request);
+
+  for (auto *SB: Subs)
+    if (CoroSaveInst *Tok = findSuspendToken(SB)) {
+      CallInst::Create(Fn, {CoroId, Tok}, "", SB);
+    }
+}
+
 bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
                             DominatorTree &DT) {
   CoroBegins.clear();
@@ -242,7 +266,7 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
       CoroSubFromBeg.push_back(FB);
   }
 
-  SmallPtrSet<CoroIdInst*, 1> CoroIdsToLink;
+  SmallVector<CoroSubFnInst*, 1> ReverseInlineCandidates;
 
   // Collect all coro.subfn.addrs associated with coro.begin.
   // Note, we only devirtualize the calls if their coro.subfn.addr refers to
@@ -254,9 +278,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
         switch (II->getIndex()) {
         case CoroSubFnInst::ResumeIndex:
           ResumeAddr.push_back(II);
-          if (auto *LCB =
-                  dyn_cast_or_null<CoroBeginInst>(II->getContinuation()))
-            CoroIdsToLink.insert(LCB->getId());
+          if (II->getContinuation())
+            ReverseInlineCandidates.push_back(II);
           break;
         case CoroSubFnInst::DestroyIndex:
           DestroyAddr.push_back(II);
@@ -265,6 +288,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
           llvm_unreachable("unexpected coro.subfn.addr constant");
         }
   }
+
+  prepareForReverseInlining(CoroId, ReverseInlineCandidates);
 
   // PostSplit coro.id refers to an array of subfunctions in its Info
   // argument.
@@ -284,22 +309,14 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
 
   replaceWithConstant(DestroyAddrConstant, DestroyAddr);
 
-  //replaceWithConstants(ResumeAddrConstant, DestroyAddrConstant, CoroSubFromBeg);
-
   if (ShouldElide) {
     auto *FrameTy = getFrameType(cast<Function>(ResumeAddrConstant));
     elideHeapAllocations(CoroId->getFunction(), FrameTy, AA);
     coro::replaceCoroFree(CoroId, /*Elide=*/true);
 
-    assert(CoroIdsToLink.size() <= 1 && "Linking to multiple coro.ids");
-    for (auto *LID: CoroIdsToLink)
-      CoroId->setCallerId(LID);
-
-#if 1 // TODO: Do this at coro split time
     for (auto *SB: CoroSubFromBeg)
       if (SB->getIndex() == CoroSubFromBegInst::DestroyIndex)
         SB->setIndex(CoroSubFromBegInst::CleanupIndex);
-#endif
   }
 
   return true;

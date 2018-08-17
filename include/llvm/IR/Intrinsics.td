@@ -811,6 +811,8 @@ def int_coro_promise : Intrinsic<[llvm_ptr_ty],
 
 // Coroutine Lowering Intrinsics. Used internally by coroutine passes.
 
+def int_coro_rinline_request : Intrinsic<[], [llvm_token_ty, llvm_token_ty], []>;
+
 def int_coro_subfn_addr_from_beg : Intrinsic<[llvm_ptr_ty], [llvm_token_ty, llvm_i8_ty],
                                     [IntrNoMem]>;
 

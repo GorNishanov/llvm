@@ -112,6 +112,9 @@ bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
       case Intrinsic::coro_cc_addr:
         lowerGetCcAddr(Builder, II);
         break;
+      case Intrinsic::coro_rinline_request:
+        // Just remove this one.
+        break;
       }
       II->eraseFromParent();
       Changed = true;
@@ -143,10 +146,10 @@ struct CoroCleanup : FunctionPass {
   // This pass has work to do only if we find intrinsics we are going to lower
   // in the module.
   bool doInitialization(Module &M) override {
-    if (coro::declaresIntrinsics(M, {"llvm.coro.alloc", "llvm.coro.begin",
-                                     "llvm.coro.subfn.addr", "llvm.coro.free",
-                                     "llvm.coro.id",
-                                     "llvm.coro.subfn.addr.from.beg"}))
+    if (coro::declaresIntrinsics(
+            M, {"llvm.coro.alloc", "llvm.coro.begin", "llvm.coro.subfn.addr",
+                "llvm.coro.free", "llvm.coro.id", "llvm.coro.rinline.request",
+                "llvm.coro.subfn.addr.from.beg"}))
       L = llvm::make_unique<Lowerer>(M);
     return false;
   }

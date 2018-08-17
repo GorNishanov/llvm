@@ -137,13 +137,25 @@ Value *coro::LowererBase::makeSubFnCall(Value *Arg, int Index,
 #ifndef NDEBUG
 static bool isCoroutineIntrinsicName(StringRef Name) {
   // NOTE: Must be sorted!
-  static const char *const CoroIntrinsics[] = {
-      "llvm.coro.alloc",   "llvm.coro.begin",   "llvm.coro.destroy",
-      "llvm.coro.done",    "llvm.coro.end",     "llvm.coro.frame",
-      "llvm.coro.free",    "llvm.coro.id",      "llvm.coro.noop",
-      "llvm.coro.param",   "llvm.coro.promise", "llvm.coro.resume",
-      "llvm.coro.save",    "llvm.coro.size",    "llvm.coro.subfn.addr",
-      "llvm.coro.suspend",
+  static const char *const CoroIntrinsics[] = {"llvm.coro.alloc",
+                                               "llvm.coro.begin",
+                                               "llvm.coro.destroy",
+                                               "llvm.coro.done",
+                                               "llvm.coro.end",
+                                               "llvm.coro.frame",
+                                               "llvm.coro.free",
+                                               "llvm.coro.id",
+                                               "llvm.coro.noop",
+                                               "llvm.coro.param",
+                                               "llvm.coro.promise",
+                                               "llvm.coro.resume",
+                                               "llvm.coro.rinline.request",
+                                               "llvm.coro.save",
+                                               "llvm.coro.size",
+                                               "llvm.coro.subfn.addr",
+                                               "llvm.coro.subfn.addr.from.beg",
+                                               "llvm.coro.suspend"
+
   };
   return Intrinsic::lookupLLVMIntrinsicByName(CoroIntrinsics, Name) != -1;
 }
