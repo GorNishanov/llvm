@@ -169,6 +169,17 @@ static void updateInnerClone(Function *InnerClone, Function *NewResume) {
       CallSite CS{SF->getCallSite()};
       replaceAndRecursivelySimplify(SF, Repl);
 
+      auto *ArgType = NewResume->arg_begin()->getType();
+      auto *InsertPt = CS.getInstruction();
+      auto *Arg = CS.getArgument(0);
+
+      auto *TypedArg = new BitCastInst(Arg, ArgType, "", InsertPt);
+      auto *Call = CallInst::Create(NewResume, {TypedArg}, "", InsertPt);
+      InsertPt->eraseFromParent();
+      CS = Call;
+
+      // TODO: Handle invoke as well
+
       if (CS) {
         InlineFunctionInfo IFI;
         InlineFunction(CS, IFI);
