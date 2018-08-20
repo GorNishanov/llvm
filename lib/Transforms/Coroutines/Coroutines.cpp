@@ -217,8 +217,9 @@ static void buildCGN(CallGraph &CG, CallGraphNode *Node) {
 
 // Rebuild CGN after we extracted parts of the code from ParentFunc into
 // NewFuncs. Builds CGNs for the NewFuncs and adds them to the current SCC.
-void coro::updateCallGraph(Function &ParentFunc, ArrayRef<Function *> NewFuncs,
-                           CallGraph &CG, CallGraphSCC &SCC) {
+void coro::updateCallGraph(Function &ParentFunc,
+                           SmallVectorImpl<Function *>& NewFuncs, CallGraph &CG,
+                           CallGraphSCC &SCC) {
   // Rebuild CGN from scratch for the ParentFunc
   auto *ParentNode = CG[&ParentFunc];
   ParentNode->removeAllCalledFunctions();

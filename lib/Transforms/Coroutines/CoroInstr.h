@@ -26,6 +26,7 @@
 #ifndef LLVM_LIB_TRANSFORMS_COROUTINES_COROINSTR_H
 #define LLVM_LIB_TRANSFORMS_COROUTINES_COROINSTR_H
 
+#include "llvm/IR/CallSite.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IntrinsicInst.h"
 
@@ -63,6 +64,19 @@ public:
 
   ConstantInt *getRawIndex() const {
     return cast<ConstantInt>(getArgOperand(IndexArg));
+  }
+
+  CallSite getCallSite() const {
+    Instruction *I = const_cast<CoroSubFnInst*>(this);
+    while (I->hasOneUse()) {
+      I = dyn_cast<Instruction>(I->use_begin()->getUser());
+      if (!I)
+        return {};
+
+      if (CallSite CS{I})
+        return CS;
+    }
+    return {};
   }
 
   // Methods to support type inquiry through isa, cast, and dyn_cast:
@@ -291,7 +305,29 @@ public:
   }
 };
 
-/// This represents the llvm.coro.save instruction.
+/// This represents the llvm.coro.cc.addr instruction.
+class LLVM_LIBRARY_VISIBILITY CoroCcAddrInst : public IntrinsicInst {
+public:
+  enum { FrameArg };
+
+  Value *getFramePtr() const {
+    Value *Result = getArgOperand(FrameArg);
+    if (auto *BC = dyn_cast<BitCastInst>(Result))
+      Result = BC->getOperand(0);
+
+    return Result;
+  }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_cc_addr;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.rinline.request instruction.
 class LLVM_LIBRARY_VISIBILITY CoroInlineRequestInst : public IntrinsicInst {
 public:
   enum { IdArg, SaveArg };

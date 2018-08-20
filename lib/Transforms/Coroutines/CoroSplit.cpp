@@ -28,6 +28,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Attributes.h"
@@ -71,13 +72,15 @@ using namespace llvm;
 
 #define DEBUG_TYPE "coro-split"
 
+static void addMustTailToCoroResumes(Function &F);
+static void postSplitCleanup(Function &F);
 static void setCoroInfo(Function &F, CoroIdInst *CoroId,
                         std::initializer_list<Function *> Fns);
 
 namespace {
 struct ReverseInlineWorker {
 
-  void addSuspendPoint(CoroSaveInst *Save, size_t Index) {
+  void addSuspendPoint(CoroSaveInst *Save, ConstantInt *Index) {
     SmallVector<Request, 1> Requests;
 
     for (auto *U : Save->users())
@@ -88,7 +91,8 @@ struct ReverseInlineWorker {
       Entries.emplace_back(Index, Requests);
   }
   void prepareInnerClones(Function& Outer);
-  void createResumeClones() {}
+  void createResumeClones(Function *ResumeFn);
+  void finalize(SmallVectorImpl<Function *>& Fs);
 
 private:
   struct Request {
@@ -99,11 +103,11 @@ private:
   };
 
   struct Entry {
-    size_t Index;
+    ConstantInt *Index;
     Function *ResumeClone = nullptr;
     SmallVector<Request, 1> Requests;
 
-    explicit Entry(size_t Index, SmallVector<Request, 1> &Reqs)
+    explicit Entry(ConstantInt *Index, SmallVector<Request, 1> &Reqs)
         : Index(Index), Requests(std::move(Reqs)) {}
   };
   SmallVector<Entry, 2> Entries;
@@ -125,11 +129,88 @@ void ReverseInlineWorker::prepareInnerClones(Function& Outer) {
       ValueToValueMapTy VMap;
       R.InnerClone = CloneFunction(ResumeFn, VMap);
       R.InnerClone->setName(ResumeFn->getName() +
-        Twine(".from." + Outer.getName() + ".") + Twine(E.Index));
+                            Twine(".from." + Outer.getName() + ".") +
+                            Twine(E.Index->getZExtValue()));
 
       // Update CoroId to refer to the clone.
-      setCoroInfo(*R.InnerClone, CoroId, {ResumeFn, DestroyFn, CleanupFn});
+      setCoroInfo(*R.InnerClone, CoroId, {R.InnerClone, DestroyFn, CleanupFn});
     }
+}
+
+static void updateInnerClone(Function *InnerClone, Function *NewResume) {
+  // Go through all getCCaddr and
+
+  Argument *NewFramePtr = &*InnerClone->arg_begin();
+  SmallVector<CoroCcAddrInst *, 2> CcAddrs;
+
+  for (auto &I : instructions(InnerClone))
+    if (auto *Cc = dyn_cast<CoroCcAddrInst>(&I))
+      if (Cc->getFramePtr() == NewFramePtr)
+        CcAddrs.push_back(Cc);
+
+  if (CcAddrs.empty())
+    return;
+
+  auto *Repl = ConstantExpr::getBitCast(NewResume, CcAddrs.front()->getType());
+
+  SmallVector<CoroSubFnInst *, 2> SubFns;
+  for (auto *Cc : CcAddrs) {
+    SubFns.clear();
+    for (auto *U : Cc->users())
+      if (auto *SF = dyn_cast<CoroSubFnInst>(U))
+        SubFns.push_back(SF);
+
+    //Cc->replaceAllUsesWith(Repl);
+    //Cc->eraseFromParent();
+
+    // TODO: replace with direct call to correct function
+
+    for (auto *SF : SubFns) {
+      CallSite CS{SF->getCallSite()};
+      replaceAndRecursivelySimplify(SF, Repl);
+
+      if (CS) {
+        InlineFunctionInfo IFI;
+        InlineFunction(CS, IFI);
+      }
+    }
+  }
+}
+
+void ReverseInlineWorker::createResumeClones(Function *ResumeFn) {
+  auto *AllocaSpillBB = &ResumeFn->getEntryBlock();
+  auto *SwitchBB = AllocaSpillBB->getSingleSuccessor();
+  auto *Switch = cast<SwitchInst>(SwitchBB->getTerminator());
+
+  for (auto &Entry: Entries) {
+    auto *Dest = Switch->findCaseValue(Entry.Index)->getCaseSuccessor();
+
+    ValueToValueMapTy VMap;
+    auto *NewPart = CloneFunction(ResumeFn, VMap);
+    auto *NewSuccessor = cast<BasicBlock>(VMap[Dest]);
+    auto *NewSwitch = cast<SwitchInst>(VMap[Switch]);
+    BranchInst::Create(NewSuccessor, NewSwitch);
+    NewSwitch->eraseFromParent();
+
+    NewPart->setName(ResumeFn->getName() + Twine(".part.") +
+                      Twine(Entry.Index->getZExtValue()));
+
+    Entry.ResumeClone = NewPart;
+
+    postSplitCleanup(*NewPart);
+    addMustTailToCoroResumes(*NewPart);
+
+    for (auto &R: Entry.Requests)
+      updateInnerClone(R.InnerClone, NewPart);
+  }
+}
+
+void ReverseInlineWorker::finalize(SmallVectorImpl<Function *>& Fs) {
+  for (auto &E: Entries) {
+    Fs.push_back(E.ResumeClone);
+    for (auto &R: E.Requests)
+      Fs.push_back(R.InnerClone);
+  }
 }
 
 // Create an entry block for a resume function with a switch that will jump to
@@ -182,7 +263,7 @@ static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape,
           FrameTy, FramePtr, 0, coro::Shape::IndexField, "index.addr");
       Builder.CreateStore(IndexVal, GepIndex);
     }
-    ReverseInliner.addSuspendPoint(Save, SuspendIndex);
+    ReverseInliner.addSuspendPoint(Save, IndexVal);
     Save->replaceAllUsesWith(ConstantTokenNone::get(C));
     Save->eraseFromParent();
 
@@ -301,24 +382,6 @@ static void handleFinalSuspend(IRBuilder<> &Builder, Value *FramePtr,
     OldSwitchBB->getTerminator()->eraseFromParent();
   }
 }
-
-#if 0
-static void createResumeParts(Function &ResumeFn) {
-  SmallVector<Function *, 4> Parts;
-
-  auto *AllocaSpillBB = &ResumeFn.getEntryBlock();
-  auto *SwitchBB = AllocaSpillBB->getSingleSuccessor();
-  auto *Switch = cast<SwitchInst>(SwitchBB->getTerminator());
-
-  for (auto &Case : Switch->cases()) {
-    ValueToValueMapTy VMap;
-    auto *NewPart = CloneFunction(&ResumeFn, VMap);
-    auto *NewSuccessor = cast<BasicBlock>(VMap[Case.getCaseSuccessor()]);
-    NewSuccessor->moveBefore(&NewPart->getEntryBlock());
-    Parts.push_back(NewPart);
-  }
-}
-#endif
 
 // Create a resume clone by cloning the body of the original function, setting
 // new entry block and replacing coro.suspend an appropriate value to force
@@ -513,32 +576,6 @@ static void updateCoroFrame(coro::Shape &Shape, Function *ResumeFn) {
   auto *DestroyFnAddr = makeSubFromBeginFnCall(Builder, Shape, ResumeFn, 1);
   Builder.CreateStore(DestroyFnAddr, DestroyAddr);
 }
-
-#if 0
-// Store addresses of Resume/Destroy/Cleanup functions in the coroutine frame.
-static void updateCoroFrame(coro::Shape &Shape, Function *ResumeFn,
-                            Function *DestroyFn, Function *CleanupFn) {
-  IRBuilder<> Builder(Shape.FramePtr->getNextNode());
-  auto *ResumeAddr = Builder.CreateConstInBoundsGEP2_32(
-      Shape.FrameTy, Shape.FramePtr, 0, coro::Shape::ResumeField,
-      "resume.addr");
-  Builder.CreateStore(ResumeFn, ResumeAddr);
-
-  Value *DestroyOrCleanupFn = DestroyFn;
-
-  CoroIdInst *CoroId = Shape.CoroBegin->getId();
-  if (CoroAllocInst *CA = CoroId->getCoroAlloc()) {
-    // If there is a CoroAlloc and it returns false (meaning we elide the
-    // allocation, use CleanupFn instead of DestroyFn).
-    DestroyOrCleanupFn = Builder.CreateSelect(CA, DestroyFn, CleanupFn);
-  }
-
-  auto *DestroyAddr = Builder.CreateConstInBoundsGEP2_32(
-      Shape.FrameTy, Shape.FramePtr, 0, coro::Shape::DestroyField,
-      "destroy.addr");
-  Builder.CreateStore(DestroyOrCleanupFn, DestroyAddr);
-}
-#endif
 
 static void postSplitCleanup(Function &F) {
   removeUnreachableBlocks(F);
@@ -852,7 +889,8 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
     handleNoSuspendCoroutine(Shape.CoroBegin, Shape.FrameTy);
     removeCoroEnds(Shape);
     postSplitCleanup(F);
-    coro::updateCallGraph(F, {}, CG, SCC);
+    SmallVector<Function *, 1> EmptyVec;
+    coro::updateCallGraph(F, EmptyVec, CG, SCC);
     return;
   }
 
@@ -862,7 +900,7 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   auto ResumeClone = createClone(F, ".resume", Shape, ResumeEntry, 0);
   auto DestroyClone = createClone(F, ".destroy", Shape, ResumeEntry, 1);
   auto CleanupClone = createClone(F, ".cleanup", Shape, ResumeEntry, 2);
-  ReverseInliner.createResumeClones();
+  ReverseInliner.createResumeClones(ResumeClone);
 
   // createResumeParts(*ResumeClone); // NOT NEEDED YET
 
@@ -885,8 +923,12 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   setCoroInfo(F, Shape.CoroBegin->getId(),
               {ResumeClone, DestroyClone, CleanupClone});
 
+  SmallVector<Function *, 5> funcsToAdd{ResumeClone, DestroyClone,
+                                        CleanupClone};
+  ReverseInliner.finalize(funcsToAdd);
+
   // Update call graph and add the functions we created to the SCC.
-  coro::updateCallGraph(F, {ResumeClone, DestroyClone, CleanupClone}, CG, SCC);
+  coro::updateCallGraph(F, funcsToAdd, CG, SCC);
 }
 
 // When we see the coroutine the first time, we insert an indirect call to a
