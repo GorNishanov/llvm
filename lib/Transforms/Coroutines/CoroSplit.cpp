@@ -176,6 +176,9 @@ static void updateInnerClone(Function *InnerClone, Function *NewResume) {
       auto *TypedArg = new BitCastInst(Arg, ArgType, "", InsertPt);
       auto *Call = CallInst::Create(NewResume, {TypedArg}, "", InsertPt);
       InsertPt->eraseFromParent();
+      Call->setCallingConv(CallingConv::Fast);
+
+      #if 0
       CS = Call;
 
       // TODO: Handle invoke as well
@@ -184,6 +187,7 @@ static void updateInnerClone(Function *InnerClone, Function *NewResume) {
         InlineFunctionInfo IFI;
         InlineFunction(CS, IFI);
       }
+      #endif
     }
   }
 }
