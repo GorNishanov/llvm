@@ -45,8 +45,9 @@ ehcleanup:
 define i8* @noop() {
 ; CHECK-NEXT: entry
 entry:
-; CHECK-NEXT: ret i8* bitcast (%NoopCoro.Frame* @NoopCoro.Frame.Const to i8*)
-  %n = call i8* @llvm.coro.noop()
+; xxxxCHECK-NEXT: ret i8* bitcast (%NoopCoro.Frame* @NoopCoro.Frame.Const to i8*)
+; CHECK-NEXT: call i8* @llvm.coro.noop(i8* bitcast (%NoopCoro.Frame* @NoopCoro.Frame.Const to i8*)
+  %n = call i8* @llvm.coro.noop(i8* null)
   ret i8* %n
 }
 
@@ -57,4 +58,4 @@ entry:
 
 declare void @llvm.coro.resume(i8*)
 declare void @llvm.coro.destroy(i8*)
-declare i8* @llvm.coro.noop()
+declare i8* @llvm.coro.noop(i8*)

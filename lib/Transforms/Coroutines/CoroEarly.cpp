@@ -34,7 +34,7 @@ class Lowerer : public coro::LowererBase {
                             Value *Continuation = nullptr);
   void lowerCoroPromise(CoroPromiseInst *Intrin);
   void lowerCoroDone(IntrinsicInst *II);
-  void lowerCoroNoop(IntrinsicInst *II);
+  void lowerCoroNoop(CoroNoopInst *II);
 
 public:
   Lowerer(Module &M)
@@ -123,7 +123,7 @@ void Lowerer::lowerCoroDone(IntrinsicInst *II) {
   II->eraseFromParent();
 }
 
-void Lowerer::lowerCoroNoop(IntrinsicInst *II) {
+void Lowerer::lowerCoroNoop(CoroNoopInst *II) {
   if (!NoopCoro) {
     LLVMContext &C = Builder.getContext();
     Module &M = *II->getModule();
@@ -152,10 +152,12 @@ void Lowerer::lowerCoroNoop(IntrinsicInst *II) {
                                 "NoopCoro.Frame.Const");
   }
 
-  Builder.SetInsertPoint(II);
-  auto *NoopCoroVoidPtr = Builder.CreateBitCast(NoopCoro, Int8Ptr);
-  II->replaceAllUsesWith(NoopCoroVoidPtr);
-  II->eraseFromParent();
+//  Builder.SetInsertPoint(II);
+  auto *NoopCoroVoidPtr = ConstantExpr::getBitCast(NoopCoro, Int8Ptr);
+  II->setArgOperand(0, NoopCoroVoidPtr);
+  //auto *NoopCoroVoidPtr = Builder.CreateBitCast(NoopCoro, Int8Ptr); // xxx
+  //II->replaceAllUsesWith(NoopCoroVoidPtr);
+  //II->eraseFromParent();
 }
 
 // Prior to CoroSplit, calls to coro.begin needs to be marked as NoDuplicate,
@@ -194,7 +196,7 @@ bool Lowerer::lowerEarlyIntrinsics(Function &F) {
           CS.setCannotDuplicate();
         break;
       case Intrinsic::coro_noop:
-        lowerCoroNoop(cast<IntrinsicInst>(&I));
+        lowerCoroNoop(cast<CoroNoopInst>(&I));
         break;
       case Intrinsic::coro_id:
         // Mark a function that comes out of the frontend that has a coro.id

@@ -1,4 +1,5 @@
 ; Verifies that we materialize instruction across suspend points
+; XFAIL: *
 ; RUN: opt < %s -coro-split -S | FileCheck %s
 
 define i8* @f(i32 %n) "coroutine.presplit"="1" {

@@ -97,6 +97,9 @@ bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
       switch (II->getIntrinsicID()) {
       default:
         continue;
+      case Intrinsic::coro_noop:
+        II->replaceAllUsesWith(II->getArgOperand(0));
+        break;
       case Intrinsic::coro_begin:
         II->replaceAllUsesWith(II->getArgOperand(1));
         break;

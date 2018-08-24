@@ -133,6 +133,18 @@ public:
 };
 
 /// This represents the llvm.coro.alloc instruction.
+class LLVM_LIBRARY_VISIBILITY CoroNoopInst : public IntrinsicInst {
+public:
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_noop;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.alloc instruction.
 class LLVM_LIBRARY_VISIBILITY CoroAllocInst : public IntrinsicInst {
 public:
   // Methods to support type inquiry through isa, cast, and dyn_cast:
@@ -144,7 +156,7 @@ public:
   }
 };
 
-/// This represents the llvm.coro.alloc instruction.
+/// This represents the llvm.coro.id instruction.
 class LLVM_LIBRARY_VISIBILITY CoroIdInst : public IntrinsicInst {
   enum { AlignArg, PromiseArg, CoroutineArg, InfoArg, CallerIdArg };
 
