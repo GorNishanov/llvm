@@ -45,7 +45,8 @@ struct Lowerer : coro::LowererBase {
 // Go through the list of coro.subfn.addr intrinsics and replace them with the
 // provided constant.
 static void replaceWithConstant(Constant *Value,
-                                SmallVectorImpl<CoroSubFnInst *> &Users) {
+                                SmallVectorImpl<CoroSubFnInst *> &Users,
+                                Constant *AltValue = nullptr) {
   if (Users.empty())
     return;
 
@@ -60,10 +61,14 @@ static void replaceWithConstant(Constant *Value,
     assert(ValueTy->isPointerTy() && IntrTy->isPointerTy());
     Value = ConstantExpr::getBitCast(Value, IntrTy);
   }
+  if (AltValue != nullptr) {
+    AltValue = ConstantExpr::getBitCast(AltValue, IntrTy);
+  }
 
   // Now the value type matches the type of the intrinsic. Replace them all!
   for (CoroSubFnInst *I : Users)
-    replaceAndRecursivelySimplify(I, Value);
+    replaceAndRecursivelySimplify(
+        I, (AltValue && I->getContinuation()) ? AltValue : Value);
 }
 
 #if 0
@@ -231,10 +236,12 @@ static CoroSaveInst *findSuspendToken(CoroSubFnInst *SB) {
   return nullptr;
 }
 
-static void prepareForReverseInlining(CoroIdInst *CoroId,
+static bool prepareForReverseInlining(CoroIdInst *CoroId,
                                       SmallVectorImpl<CoroSubFnInst *> &Subs) {
   if (Subs.empty())
-    return;
+    return false;
+
+  bool FoundOne = false;
 
   auto &M = *Subs.front()->getFunction()->getParent();
   auto *Fn = Intrinsic::getDeclaration(&M, Intrinsic::coro_rinline_request);
@@ -242,7 +249,10 @@ static void prepareForReverseInlining(CoroIdInst *CoroId,
   for (auto *SB: Subs)
     if (CoroSaveInst *Tok = findSuspendToken(SB)) {
       CallInst::Create(Fn, {CoroId, Tok}, "", SB);
+      FoundOne = true;
     }
+
+  return FoundOne;
 }
 
 bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
@@ -289,7 +299,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
         }
   }
 
-  prepareForReverseInlining(CoroId, ReverseInlineCandidates);
+  bool FoundResumeCC =
+      prepareForReverseInlining(CoroId, ReverseInlineCandidates);
 
   // PostSplit coro.id refers to an array of subfunctions in its Info
   // argument.
@@ -298,8 +309,12 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
                      "of coroutine subfunctions");
   auto *ResumeAddrConstant =
       ConstantExpr::getExtractValue(Resumers, CoroSubFnInst::ResumeIndex);
+  Constant *InitAddr =
+      FoundResumeCC
+          ? ConstantExpr::getExtractValue(Resumers, CoroSubFnInst::InitIndex)
+          : nullptr;
 
-  replaceWithConstant(ResumeAddrConstant, ResumeAddr);
+  replaceWithConstant(ResumeAddrConstant, ResumeAddr, InitAddr);
 
   bool ShouldElide = shouldElide(CoroId->getFunction(), DT);
 
@@ -308,6 +323,11 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
       ShouldElide ? CoroSubFnInst::CleanupIndex : CoroSubFnInst::DestroyIndex);
 
   replaceWithConstant(DestroyAddrConstant, DestroyAddr);
+
+  if (FoundResumeCC)
+    for (auto *SB: CoroSubFromBeg)
+      if (SB->getIndex() == CoroSubFromBegInst::ResumeIndex)
+        SB->setIndex(CoroSubFromBegInst::TheRestIndex);
 
   if (ShouldElide) {
     auto *FrameTy = getFrameType(cast<Function>(ResumeAddrConstant));

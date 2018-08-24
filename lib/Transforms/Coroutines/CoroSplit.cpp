@@ -97,7 +97,7 @@ struct ReverseInlineWorker {
 private:
   struct Request {
     CoroInlineRequestInst *RequestInst;
-    Function *InnerClone = nullptr;
+    SmallVector<Function *, 3> InnerClones;
 
     explicit Request(CoroInlineRequestInst *RI) : RequestInst(RI) {}
   };
@@ -114,26 +114,45 @@ private:
 };
 } // namespace
 
-void ReverseInlineWorker::prepareInnerClones(Function& Outer) {
-  for (auto &E: Entries)
-    for (auto &R: E.Requests) {
+
+void ReverseInlineWorker::prepareInnerClones(Function &Outer) {
+  for (auto &E : Entries)
+    for (auto &R : E.Requests) {
       auto *CoroId = R.RequestInst->getId();
       ConstantArray *Resumers = CoroId->getInfo().Resumers;
-      assert(Resumers && "PostSplit coro.id Info argument must refer to an array"
-                         "of coroutine subfunctions");
+      assert(Resumers &&
+             "PostSplit coro.id Info argument must refer to an array"
+             "of coroutine subfunctions");
 
-      auto *ResumeFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 0));
-      auto *DestroyFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 1));
-      auto *CleanupFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 2));
+      auto *ResumeFn =
+          cast<Function>(ConstantExpr::getExtractValue(Resumers, 0));
+      auto *DestroyFn =
+          cast<Function>(ConstantExpr::getExtractValue(Resumers, 1));
+      auto *CleanupFn =
+          cast<Function>(ConstantExpr::getExtractValue(Resumers, 2));
+      auto *InitFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 3));
+      auto *RestFn = cast<Function>(ConstantExpr::getExtractValue(Resumers, 4));
 
-      ValueToValueMapTy VMap;
-      R.InnerClone = CloneFunction(ResumeFn, VMap);
-      R.InnerClone->setName(ResumeFn->getName() +
-                            Twine(".from." + Outer.getName() + ".") +
-                            Twine(E.Index->getZExtValue()));
+      auto prepareInnerClone = [&] (Function *ResumeFn) {
+        ValueToValueMapTy VMap;
+        auto *NewF = CloneFunction(ResumeFn, VMap);
+        NewF->setName(ResumeFn->getName() +
+                              Twine(".from." + Outer.getName() + ".") +
+                              Twine(E.Index->getZExtValue()));
+        return NewF;
+      };
+
+      ResumeFn = prepareInnerClone(ResumeFn);
+      InitFn = prepareInnerClone(InitFn);
+      RestFn = prepareInnerClone(RestFn);
+
+      R.InnerClones.push_back(ResumeFn);
+      R.InnerClones.push_back(InitFn);
+      R.InnerClones.push_back(RestFn);
 
       // Update CoroId to refer to the clone.
-      setCoroInfo(*R.InnerClone, CoroId, {R.InnerClone, DestroyFn, CleanupFn});
+      setCoroInfo(*ResumeFn, CoroId,
+                  {ResumeFn, DestroyFn, CleanupFn, InitFn, RestFn});
     }
 }
 
@@ -216,7 +235,8 @@ void ReverseInlineWorker::createResumeClones(Function *ResumeFn) {
     addMustTailToCoroResumes(*NewPart);
 
     for (auto &R: Entry.Requests)
-      updateInnerClone(R.InnerClone, NewPart);
+      for (Function *InnerClone: R.InnerClones)
+        updateInnerClone(InnerClone, NewPart);
   }
 }
 
@@ -224,8 +244,45 @@ void ReverseInlineWorker::finalize(SmallVectorImpl<Function *>& Fs) {
   for (auto &E: Entries) {
     Fs.push_back(E.ResumeClone);
     for (auto &R: E.Requests)
-      Fs.push_back(R.InnerClone);
+      for (Function *InnerClone: R.InnerClones)
+        Fs.push_back(InnerClone);
   }
+}
+
+struct ExtractInitialSuspendResults {
+  Function *InitialFn;
+  Function *RemainingResume;
+};
+
+ExtractInitialSuspendResults extractInitialSuspend(Function *ResumeFn) {
+  auto *AllocaSpillBB = &ResumeFn->getEntryBlock();
+  auto *SwitchBB = AllocaSpillBB->getSingleSuccessor();
+  auto *Switch = cast<SwitchInst>(SwitchBB->getTerminator());
+
+  ValueToValueMapTy VMapInit, VMapTheRest;
+  ExtractInitialSuspendResults Result{CloneFunction(ResumeFn, VMapInit),
+                                      CloneFunction(ResumeFn, VMapTheRest)};
+
+  {
+    auto *InitSw = cast<SwitchInst>(VMapInit[Switch]);
+    auto FirstCase = InitSw->case_begin();
+    auto *NewSuccessor = FirstCase->getCaseSuccessor();
+    BranchInst::Create(NewSuccessor, InitSw);
+    InitSw->eraseFromParent();
+    postSplitCleanup(*Result.InitialFn);
+    Result.InitialFn->setName(ResumeFn->getName() + Twine(".initial"));
+  }
+
+
+  {
+    auto *RestSw = cast<SwitchInst>(VMapTheRest[Switch]);
+    auto FirstCase = RestSw->case_begin();
+    RestSw->removeCase(FirstCase);
+    postSplitCleanup(*Result.RemainingResume);
+    Result.RemainingResume->setName(ResumeFn->getName() + Twine(".the.rest"));
+  }
+
+  return Result;
 }
 
 // Create an entry block for a resume function with a switch that will jump to
@@ -916,6 +973,7 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   auto DestroyClone = createClone(F, ".destroy", Shape, ResumeEntry, 1);
   auto CleanupClone = createClone(F, ".cleanup", Shape, ResumeEntry, 2);
   ReverseInliner.createResumeClones(ResumeClone);
+  auto x = extractInitialSuspend(ResumeClone);
 
   // createResumeParts(*ResumeClone); // NOT NEEDED YET
 
@@ -936,10 +994,11 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   // by the last argument of @llvm.coro.info, so that CoroElide pass can
   // determined correct function to call.
   setCoroInfo(F, Shape.CoroBegin->getId(),
-              {ResumeClone, DestroyClone, CleanupClone});
+              {ResumeClone, DestroyClone, CleanupClone, x.InitialFn,
+               x.RemainingResume});
 
-  SmallVector<Function *, 5> funcsToAdd{ResumeClone, DestroyClone,
-                                        CleanupClone};
+  SmallVector<Function *, 5> funcsToAdd{ResumeClone, DestroyClone, CleanupClone,
+                                        x.InitialFn, x.RemainingResume};
   ReverseInliner.finalize(funcsToAdd);
 
   // Update call graph and add the functions we created to the SCC.

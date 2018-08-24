@@ -42,6 +42,8 @@ public:
     ResumeIndex,
     DestroyIndex,
     CleanupIndex,
+    InitIndex,
+    TheRestIndex,
     IndexLast,
     IndexFirst = RestartTrigger
   };
@@ -97,6 +99,8 @@ public:
     ResumeIndex,
     DestroyIndex,
     CleanupIndex,
+    InitIndex,
+    TheRestIndex,
     IndexLast,
     IndexFirst = ResumeIndex
   };
