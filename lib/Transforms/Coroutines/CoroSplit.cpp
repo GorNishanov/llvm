@@ -364,6 +364,22 @@ static void replaceFrameSize(coro::Shape &Shape) {
     CS->replaceAllUsesWith(SizeConstant);
     CS->eraseFromParent();
   }
+
+  for (CoroSizeChkInst *CS : Shape.CoroSizeChks) {
+    if (!CS->isConstant())
+      LLVM_DEBUG(dbgs() << "coroutine frame size check is not a constant\n");
+
+      // when it is a real contract. It is visible on the definition
+      // for right now, we can only deal with this if operator new was inlined.
+      // report_fatal_error("coroutine frame size check is not a constant");
+    else if ((int64_t)Size > CS->getSizeEstimate())
+      report_fatal_error("In function '" + CS->getFunction()->getName() +
+        "' coroutine frame size " + Twine(Size) + " exceeds the frontend estimate of "
+        + Twine(CS->getSizeEstimate()) + ".");
+
+    // Note that we do not remove the check intrinsic, so that it can be
+    // used to inhibit Halo optimization.
+  }
 }
 
 // Create a global constant array containing pointers to functions provided and

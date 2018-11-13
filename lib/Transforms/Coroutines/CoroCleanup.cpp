@@ -79,6 +79,9 @@ bool Lowerer::lowerRemainingCoroIntrinsics(Function &F) {
       case Intrinsic::coro_subfn_addr:
         lowerSubFn(Builder, cast<CoroSubFnInst>(II));
         break;
+      case Intrinsic::coro_size_chk:
+        // Just remove it.
+        break;
       }
       II->eraseFromParent();
       Changed = true;

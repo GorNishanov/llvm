@@ -196,6 +196,19 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
   ResumeAddr.clear();
   DestroyAddr.clear();
 
+  bool HasSizeChecksIntrinsics = false;
+
+  // TODO: For now, just the mere presense of the coro_size_chk disables
+  // the Halo optimization. We need to investigate if less blunt approach
+  // is possible.
+  for (Instruction &I : instructions(CoroId->getFunction()))
+    if (isa<CoroSizeChkInst>(&I)) {
+      LLVM_DEBUG(dbgs() << "disabling Halo optimization "
+                           " due to presence of coro_size_chk\n");
+      HasSizeChecksIntrinsics = false;
+      break;
+    }
+
   // Collect all coro.begin and coro.allocs associated with this coro.id.
   for (User *U : CoroId->users()) {
     if (auto *CB = dyn_cast<CoroBeginInst>(U))
@@ -243,7 +256,7 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
 
   replaceWithConstant(DestroyAddrConstant, DestroyAddr);
 
-  if (ShouldElide) {
+  if (ShouldElide && !HasSizeChecksIntrinsics) {
     auto *FrameTy = getFrameType(cast<Function>(ResumeAddrConstant));
     elideHeapAllocations(CoroId->getFunction(), FrameTy, AA);
     coro::replaceCoroFree(CoroId, /*Elide=*/true);

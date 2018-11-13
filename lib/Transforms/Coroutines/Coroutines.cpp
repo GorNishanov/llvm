@@ -249,6 +249,9 @@ void coro::Shape::buildFrom(Function &F) {
       case Intrinsic::coro_size:
         CoroSizes.push_back(cast<CoroSizeInst>(II));
         break;
+      case Intrinsic::coro_size_chk:
+        CoroSizeChks.push_back(cast<CoroSizeChkInst>(II));
+        break;
       case Intrinsic::coro_frame:
         CoroFrames.push_back(cast<CoroFrameInst>(II));
         break;

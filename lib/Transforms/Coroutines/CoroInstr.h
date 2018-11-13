@@ -299,6 +299,32 @@ public:
   }
 };
 
+
+/// This represents the llvm.coro.size instruction.
+class LLVM_LIBRARY_VISIBILITY CoroSizeChkInst : public IntrinsicInst {
+  enum { SizeEst };
+
+  ConstantInt *getRawIndex() const {
+    return cast<ConstantInt>(getArgOperand(SizeEst));
+  }
+public:
+  bool isConstant() const {
+    return isa<ConstantInt>(getArgOperand(SizeEst));
+  }
+
+  int64_t getSizeEstimate() const {
+    return getRawIndex()->getValue().getSExtValue();
+  }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_size_chk;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
 /// This represents the llvm.coro.end instruction.
 class LLVM_LIBRARY_VISIBILITY CoroEndInst : public IntrinsicInst {
   enum { FrameArg, UnwindArg };
