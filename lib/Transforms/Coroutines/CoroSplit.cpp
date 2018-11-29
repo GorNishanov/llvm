@@ -538,27 +538,53 @@ static void handleNoSuspendCoroutine(CoroBeginInst *CoroBegin, Type *FrameTy) {
   CoroBegin->eraseFromParent();
 }
 
+static bool hasCalls(Instruction* From, Instruction *To) {
+  for (Instruction *I = From; I != To; I = I->getNextNode()) {
+    if (isa<CoroFrameInst>(I))
+      continue;
+    if (isa<CoroSubFnInst>(I))
+      continue;
+
+    if (isa<PHINode>(I) || isa<DbgInfoIntrinsic>(I))
+      continue;
+
+    if (auto *II = dyn_cast<IntrinsicInst>(I))
+      if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
+          II->getIntrinsicID() == Intrinsic::lifetime_end)
+        continue;
+
+    if (CallSite CS = CallSite(I))
+      return true;
+  }
+  return false;
+}
+
+static bool hasCallsInBlocksBetween(BasicBlock *SaveBB, BasicBlock *ResDesBB) {
+  SmallPtrSet<BasicBlock*, 8> Set;
+  SmallVector<BasicBlock*, 8> Worklist;
+
+  Set.insert(SaveBB);
+  Worklist.push_back(ResDesBB);
+
+  while (Worklist.empty()) {
+    auto *BB = Worklist.pop_back_val();
+    Set.insert(BB);
+    for (auto *Pred: predecessors(BB))
+      if (Set.count(Pred) == 0)
+        Worklist.push_back(Pred);
+  }
+
+  Set.erase(SaveBB);
+  Set.erase(ResDesBB);
+
+  for (auto *BB: Set)
+    if (hasCalls(BB->getFirstNonPHI(), BB->getTerminator()))
+      return true;
+
+  return false;
+}
+
 static bool hasCallsBetween(Instruction* Save, Instruction *ResumeOrDestroy) {
-  auto hasCalls = [](Instruction* From, Instruction *To) {
-    for (Instruction *I = From; I != To; I = I->getNextNode()) {
-      if (isa<CoroFrameInst>(I))
-        continue;
-      if (isa<CoroSubFnInst>(I))
-        continue;
-
-      if (isa<PHINode>(I) || isa<DbgInfoIntrinsic>(I))
-        continue;
-
-      if (auto *II = dyn_cast<IntrinsicInst>(I))
-        if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
-            II->getIntrinsicID() == Intrinsic::lifetime_end)
-          continue;
-
-      if (CallSite CS = CallSite(I))
-        return true;
-    }
-    return false;
-  };
 
   // At the moment, it handles only the case where Save and ResumeOrDestroy are
   // in the same basic block or Save is in the preceding block.
@@ -570,7 +596,8 @@ static bool hasCallsBetween(Instruction* Save, Instruction *ResumeOrDestroy) {
 
   if (SaveBB != ResumeOrDestroyBB) {
     if (ResumeOrDestroyBB->getSinglePredecessor() != SaveBB)
-      return true;
+      if (hasCallsInBlocksBetween(SaveBB, ResumeOrDestroyBB))
+        return true;
 
     if (hasCalls(Save->getNextNode(), SaveBB->getTerminator()))
       return true;
