@@ -538,43 +538,74 @@ static void handleNoSuspendCoroutine(CoroBeginInst *CoroBegin, Type *FrameTy) {
   CoroBegin->eraseFromParent();
 }
 
-// look for a very simple pattern
-//    coro.save
-//    no other calls
-//    resume or destroy call
-//    coro.suspend
-//
-// If there are other calls between coro.save and coro.suspend, they can
-// potentially resume or destroy the coroutine, so it is unsafe to eliminate a
-// suspend point.
+static bool hasCallsBetween(Instruction* Save, Instruction *ResumeOrDestroy) {
+  auto hasCalls = [](Instruction* From, Instruction *To) {
+    for (Instruction *I = From; I != To; I = I->getNextNode()) {
+      if (isa<CoroFrameInst>(I))
+        continue;
+      if (isa<CoroSubFnInst>(I))
+        continue;
+
+      if (isa<PHINode>(I) || isa<DbgInfoIntrinsic>(I))
+        continue;
+
+      if (auto *II = dyn_cast<IntrinsicInst>(I))
+        if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
+            II->getIntrinsicID() == Intrinsic::lifetime_end)
+          continue;
+
+      if (CallSite CS = CallSite(I))
+        return true;
+    }
+    return false;
+  };
+
+  // At the moment, it handles only the case where Save and ResumeOrDestroy are
+  // in the same basic block or Save is in the preceding block.
+  // TODO: Handle more sophisticated control flow that can happen between
+  // Save and ResumeOrDestroy.
+
+  auto *SaveBB = Save->getParent();
+  auto *ResumeOrDestroyBB = ResumeOrDestroy->getParent();
+
+  if (SaveBB != ResumeOrDestroyBB) {
+    if (ResumeOrDestroyBB->getSinglePredecessor() != SaveBB)
+      return true;
+
+    if (hasCalls(Save->getNextNode(), SaveBB->getTerminator()))
+      return true;
+
+    if (hasCalls(ResumeOrDestroyBB->getFirstNonPHI(),
+                 ResumeOrDestroy->getPrevNode()))
+      return true;
+  }
+  else if (hasCalls(Save->getNextNode(), ResumeOrDestroy->getPrevNode()))
+    return true;
+
+  return false;
+}
+
 static bool simplifySuspendPoint(CoroSuspendInst *Suspend,
                                  CoroBeginInst *CoroBegin) {
-  auto *Save = Suspend->getCoroSave();
-  auto *BB = Suspend->getParent();
-  if (BB != Save->getParent())
-    return false;
-
-  CallSite SingleCallSite;
-
-  // Check that we have only one CallSite.
-  for (Instruction *I = Save->getNextNode(); I != Suspend;
-       I = I->getNextNode()) {
-    if (isa<CoroFrameInst>(I))
-      continue;
-    if (isa<CoroSubFnInst>(I))
-      continue;
-    if (CallSite CS = CallSite(I)) {
-      if (SingleCallSite)
-        return false;
-      else
-        SingleCallSite = CS;
-    }
+  Instruction *Prev = Suspend->getPrevNode();
+  if (!Prev) {
+    auto *Pred = Suspend->getParent()->getSinglePredecessor();
+    if (!Pred)
+      return false;
+    Prev = Pred->getTerminator();
   }
-  auto *CallInstr = SingleCallSite.getInstruction();
-  if (!CallInstr)
+
+  CallSite CS{Prev};
+  if (!CS)
     return false;
 
-  auto *Callee = SingleCallSite.getCalledValue()->stripPointerCasts();
+  auto *Save = Suspend->getCoroSave();
+  auto *CallInstr = CS.getInstruction();
+
+  if (hasCallsBetween(Save, CallInstr))
+    return false;
+
+  auto *Callee = CS.getCalledValue()->stripPointerCasts();
 
   // See if the callsite is for resumption or destruction of the coroutine.
   auto *SubFn = dyn_cast<CoroSubFnInst>(Callee);
@@ -592,6 +623,9 @@ static bool simplifySuspendPoint(CoroSuspendInst *Suspend,
   Save->eraseFromParent();
 
   // No longer need a call to coro.resume or coro.destroy.
+  if (auto *Invoke = dyn_cast<InvokeInst>(CallInstr)) {
+    BranchInst::Create(Invoke->getNormalDest(), Invoke);
+  }
   CallInstr->eraseFromParent();
 
   if (SubFn->user_empty())
