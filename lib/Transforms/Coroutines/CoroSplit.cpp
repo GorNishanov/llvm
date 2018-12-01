@@ -538,20 +538,15 @@ static void handleNoSuspendCoroutine(CoroBeginInst *CoroBegin, Type *FrameTy) {
   CoroBegin->eraseFromParent();
 }
 
+// SimplifySuspendPoint needs to check that there is no calls between
+// coro_save and coro_suspend, since any of the calls may potentially resume
+// the coroutine and if that is the case we cannot eliminate the suspend point.
+
 static bool hasCalls(Instruction* From, Instruction *To) {
   for (Instruction *I = From; I != To; I = I->getNextNode()) {
-    if (isa<CoroFrameInst>(I))
+    // Assume that no intrinsic can resume the coroutine.
+    if (isa<IntrinsicInst>(I))
       continue;
-    if (isa<CoroSubFnInst>(I))
-      continue;
-
-    if (isa<PHINode>(I) || isa<DbgInfoIntrinsic>(I))
-      continue;
-
-    if (auto *II = dyn_cast<IntrinsicInst>(I))
-      if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
-          II->getIntrinsicID() == Intrinsic::lifetime_end)
-        continue;
 
     if (CallSite CS = CallSite(I))
       return true;
@@ -574,6 +569,7 @@ static bool hasCallsInBlocksBetween(BasicBlock *SaveBB, BasicBlock *ResDesBB) {
         Worklist.push_back(Pred);
   }
 
+  // SaveBB and ResDesBB are checked separately in hasCallsBetween.
   Set.erase(SaveBB);
   Set.erase(ResDesBB);
 
@@ -623,9 +619,6 @@ static bool simplifySuspendPoint(CoroSuspendInst *Suspend,
   auto *Save = Suspend->getCoroSave();
   auto *CallInstr = CS.getInstruction();
 
-  if (hasCallsBetween(Save, CallInstr))
-    return false;
-
   auto *Callee = CS.getCalledValue()->stripPointerCasts();
 
   // See if the callsite is for resumption or destruction of the coroutine.
@@ -635,6 +628,10 @@ static bool simplifySuspendPoint(CoroSuspendInst *Suspend,
 
   // Does not refer to the current coroutine, we cannot do anything with it.
   if (SubFn->getFrame() != CoroBegin)
+    return false;
+
+  // See if the transformation is safe.
+  if (hasCallsBetween(Save, CallInstr))
     return false;
 
   // Replace llvm.coro.suspend with the value that results in resumption over
