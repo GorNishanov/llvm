@@ -37,15 +37,14 @@ suspend:
 }
 
 ; SimplifySuspendPoint will detect that coro.resume resumes itself and will
-; replace suspend with a jump to %resume label turning it into no-suspend 
+; replace suspend with a jump to %resume label turning it into no-suspend
 ; coroutine.
 ;
 ; CHECK-LABEL: define void @simplify_resume(
-; CHECK-NEXT:  entry:
-; CHECK-NEXT:    call void @print(i32 0)
+; CHECK:         call void @print(i32 0)
 ; CHECK-NEXT:    ret void
 ;
-define void @simplify_resume() {
+define void @simplify_resume(i8* %src, i8* %dst) {
 entry:
   %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
@@ -60,6 +59,8 @@ coro.begin:
   br label %body
 body:
   %save = call token @llvm.coro.save(i8* %hdl)
+  ; memcpy intrinsics should be not prevent simlification.
+  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dst, i8* %src, i64 1, i1 false)
   call void @llvm.coro.resume(i8* %hdl)
   %0 = call i8 @llvm.coro.suspend(token %save, i1 false)
   switch i8 %0, label %suspend [i8 0, label %resume
@@ -130,11 +131,11 @@ suspend:
 ; other calls between coro.save and coro.suspend. They potentially can call
 ; resume or destroy, so we should not simplify this suspend point.
 ;
-; CHECK-LABEL: define void @cannot_simplify(
+; CHECK-LABEL: define void @cannot_simplify_other_calls(
 ; CHECK-NEXT:  entry:
 ; CHECK-NEXT:    call i8* @malloc
 
-define void @cannot_simplify() {
+define void @cannot_simplify_other_calls() {
 entry:
   %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
@@ -171,6 +172,51 @@ suspend:
   ret void
 }
 
+; SimplifySuspendPoint won't be able to simplify if it detects that resume or
+; destroy does not immediately preceed coro.suspend.
+;
+; CHECK-LABEL: define void @cannot_simplify_not_last_instr(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    call i8* @malloc
+
+define void @cannot_simplify_not_last_instr(i8* %dst, i8* %src) {
+entry:
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
+  %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
+  br i1 %need.dyn.alloc, label %dyn.alloc, label %coro.begin
+dyn.alloc:
+  %size = call i32 @llvm.coro.size.i32()
+  %alloc = call i8* @malloc(i32 %size)
+  br label %coro.begin
+coro.begin:
+  %phi = phi i8* [ null, %entry ], [ %alloc, %dyn.alloc ]
+  %hdl = call noalias i8* @llvm.coro.begin(token %id, i8* %phi)
+  br label %body
+body:
+  %save = call token @llvm.coro.save(i8* %hdl)
+  call void @llvm.coro.destroy(i8* %hdl)
+  ; memcpy separates destory from suspend, therefore cannot simplify.
+  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dst, i8* %src, i64 1, i1 false)
+  %0 = call i8 @llvm.coro.suspend(token %save, i1 false)
+  switch i8 %0, label %suspend [i8 0, label %resume
+                                i8 1, label %pre.cleanup]
+resume:
+  call void @print(i32 0)
+  br label %cleanup
+
+pre.cleanup:
+  call void @print(i32 1)
+  br label %cleanup
+
+cleanup:
+  %mem = call i8* @llvm.coro.free(token %id, i8* %hdl)
+  call void @free(i8* %mem)
+  br label %suspend
+suspend:
+  call i1 @llvm.coro.end(i8* %hdl, i1 false)
+  ret void
+}
+
 declare i8* @malloc(i32)
 declare void @free(i8*)
 declare void @print(i32)
@@ -187,3 +233,5 @@ declare i1 @llvm.coro.end(i8*, i1)
 
 declare void @llvm.coro.resume(i8*)
 declare void @llvm.coro.destroy(i8*)
+
+declare void @llvm.memcpy.p0i8.p0i8.i64(i8* nocapture writeonly, i8* nocapture readonly, i64, i1)
