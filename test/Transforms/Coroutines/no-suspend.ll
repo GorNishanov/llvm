@@ -91,7 +91,7 @@ suspend:
 ; CHECK-NEXT:    call void @print(i32 1)
 ; CHECK-NEXT:    ret void
 ;
-define void @simplify_destroy() {
+define void @simplify_destroy() personality i32 0 {
 entry:
   %id = call token @llvm.coro.id(i32 0, i8* null, i8* null, i8* null)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
@@ -106,7 +106,9 @@ coro.begin:
   br label %body
 body:
   %save = call token @llvm.coro.save(i8* %hdl)
-  call void @llvm.coro.destroy(i8* %hdl)
+  invoke void @llvm.coro.destroy(i8* %hdl) to label %real_susp unwind label %lpad
+
+real_susp:
   %0 = call i8 @llvm.coro.suspend(token %save, i1 false)
   switch i8 %0, label %suspend [i8 0, label %resume
                                 i8 1, label %pre.cleanup]
@@ -125,6 +127,12 @@ cleanup:
 suspend:
   call i1 @llvm.coro.end(i8* %hdl, i1 false)
   ret void
+lpad:
+  %lpval = landingpad { i8*, i32 }
+     cleanup
+
+  call void @print(i32 2)
+  resume { i8*, i32 } %lpval
 }
 
 ; SimplifySuspendPoint won't be able to simplify if it detects that there are
