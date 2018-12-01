@@ -585,12 +585,6 @@ static bool hasCallsInBlocksBetween(BasicBlock *SaveBB, BasicBlock *ResDesBB) {
 }
 
 static bool hasCallsBetween(Instruction* Save, Instruction *ResumeOrDestroy) {
-
-  // At the moment, it handles only the case where Save and ResumeOrDestroy are
-  // in the same basic block or Save is in the preceding block.
-  // TODO: Handle more sophisticated control flow that can happen between
-  // Save and ResumeOrDestroy.
-
   auto *SaveBB = Save->getParent();
   auto *ResumeOrDestroyBB = ResumeOrDestroy->getParent();
 
@@ -653,10 +647,20 @@ static bool simplifySuspendPoint(CoroSuspendInst *Suspend,
   if (auto *Invoke = dyn_cast<InvokeInst>(CallInstr)) {
     BranchInst::Create(Invoke->getNormalDest(), Invoke);
   }
+
+  // Grab the CalledValue from CS before erasing the CallInstr.
+  auto *CalledValue = CS.getCalledValue();
   CallInstr->eraseFromParent();
 
+  // If no more users remove it. Usually it is a bitcast of SubFn.
+  if (CalledValue != SubFn && CalledValue->user_empty())
+    if (auto *I = dyn_cast<Instruction>(CalledValue))
+      I->eraseFromParent();
+
+  // Now we are good to remove SubFn.
   if (SubFn->user_empty())
     SubFn->eraseFromParent();
+
 
   return true;
 }
