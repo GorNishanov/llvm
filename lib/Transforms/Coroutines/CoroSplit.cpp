@@ -329,7 +329,7 @@ static void deexceptionalizeFunclet(CleanupPadInst *Pad, Value *None) {
         else
           UnwindsToElsewhere.push_back(R);
       } else {
-        DEBUG(U->dump());
+        LLVM_DEBUG(U->dump());
         llvm_unreachable("unexpected instruction with funclet bundle");
       }
 
