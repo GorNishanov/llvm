@@ -99,9 +99,10 @@ static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape) {
       Builder.CreateSwitch(Index, UnreachBB, Shape.CoroSuspends.size());
   Shape.ResumeSwitch = Switch;
 
-  size_t SuspendIndex = 0;
+  int64_t SuspendIndex = 0;
+  int64_t FinalSuspendIndex = -1;
   for (CoroSuspendInst *S : Shape.CoroSuspends) {
-    ConstantInt *IndexVal = Shape.getIndex(SuspendIndex);
+    ConstantInt *IndexVal = nullptr;
 
     // Replace CoroSave with a store to Index:
     //    %index.addr = getelementptr %f.frame... (index field number)
@@ -115,11 +116,15 @@ static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape) {
       auto *NullPtr = ConstantPointerNull::get(cast<PointerType>(
           cast<PointerType>(GepIndex->getType())->getElementType()));
       Builder.CreateStore(NullPtr, GepIndex);
+      IndexVal = Shape.getIndex(FinalSuspendIndex--);
     } else {
-      auto *GepIndex = Builder.CreateConstInBoundsGEP2_32(
-          FrameTy, FramePtr, 0, coro::Shape::IndexField, "index.addr");
-      Builder.CreateStore(IndexVal, GepIndex);
+      IndexVal = Shape.getIndex(SuspendIndex++);
     }
+
+    auto *GepIndex = Builder.CreateConstInBoundsGEP2_32(
+        FrameTy, FramePtr, 0, coro::Shape::IndexField, "index.addr");
+    Builder.CreateStore(IndexVal, GepIndex);
+
     Save->replaceAllUsesWith(ConstantTokenNone::get(C));
     Save->eraseFromParent();
 
@@ -158,9 +163,9 @@ static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape) {
     S->replaceAllUsesWith(PN);
     PN->addIncoming(Builder.getInt8(-1), SuspendBB);
     PN->addIncoming(S, ResumeBB);
-
-    ++SuspendIndex;
   }
+
+  Shape.FinalSuspendIndex = FinalSuspendIndex;
 
   Builder.SetInsertPoint(UnreachBB);
   Builder.CreateUnreachable();
@@ -179,6 +184,51 @@ static void replaceFallthroughCoroEnd(IntrinsicInst *End,
   auto *BB = NewE->getParent();
   BB->splitBasicBlock(NewE);
   BB->getTerminator()->eraseFromParent();
+}
+
+// In Resumers, we replace unwind coro.end with True to force the immediate
+// unwind to caller.
+static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
+  if (Shape.CoroEhSuspends.empty())
+    return;
+
+  auto *FramePtr = cast<Value>(VMap[Shape.FramePtr]);
+  auto *FrameTy = Shape.FrameTy;
+
+  LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
+  IRBuilder<> Builder(Context);
+  int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
+
+  auto *True = ConstantInt::getTrue(Context);
+  for (IntrinsicInst *CE : Shape.CoroEhSuspends) {
+    auto *NewCE = cast<IntrinsicInst>(VMap[CE]);
+
+    Builder.SetInsertPoint(NewCE);
+
+    // Final suspend point also stores zero in ResumeFnAddr.
+    auto *ResumeFnAddr = Builder.CreateConstInBoundsGEP2_32(
+        FrameTy, FramePtr, 0, 0, "ResumeFn.addr");
+    auto *NullPtr = ConstantPointerNull::get(
+        cast<PointerType>( // TODO: move out of the loop
+            cast<PointerType>(ResumeFnAddr->getType())->getElementType()));
+    Builder.CreateStore(NullPtr, ResumeFnAddr);
+    ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
+
+    auto *GepIndex = Builder.CreateConstInBoundsGEP2_32(
+        FrameTy, FramePtr, 0, coro::Shape::IndexField, "index.addr");
+    Builder.CreateStore(IndexVal, GepIndex);
+
+    // If coro.end has an associated bundle, add cleanupret instruction.
+    if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
+      Value *FromPad = Bundle->Inputs[0];
+      auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
+      NewCE->getParent()->splitBasicBlock(NewCE);
+      CleanupRet->getParent()->getTerminator()->eraseFromParent();
+    }
+
+    NewCE->replaceAllUsesWith(True);
+    NewCE->eraseFromParent();
+  }
 }
 
 // In Resumers, we replace unwind coro.end with True to force the immediate
@@ -208,6 +258,7 @@ static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
   }
 }
 
+#if 0
 // Rewrite final suspend point handling. We do not use suspend index to
 // represent the final suspend point. Instead we zero-out ResumeFnAddr in the
 // coroutine frame, since it is undefined behavior to resume a coroutine
@@ -238,12 +289,110 @@ static void handleFinalSuspend(IRBuilder<> &Builder, Value *FramePtr,
     OldSwitchBB->getTerminator()->eraseFromParent();
   }
 }
+#endif
+
+// We debundle all calls except for coroutines intrinsics.
+static bool shouldBeDebundled(CallInst *I) {
+  auto II = dyn_cast<IntrinsicInst>(I);
+  if (!II)
+    return true;
+
+  switch (II->getIntrinsicID()) {
+  case Intrinsic::coro_eh_suspend:
+  case Intrinsic::coro_end:
+  case Intrinsic::coro_frame:
+  case Intrinsic::coro_free:
+  case Intrinsic::coro_size:
+    return false;
+  default:
+    return true;
+  }
+}
+
+static void deexceptionalizeFunclet(CleanupPadInst *Pad, Value *None) {
+  SmallVector<CallInst *, 4> CallsToDebundle;
+  SmallVector<CleanupPadInst *, 2> Worklist;
+  SmallVector<CleanupReturnInst *, 2> UnwindsToCaller;
+  SmallVector<CleanupReturnInst *, 2> UnwindsToElsewhere;
+
+  Worklist.push_back(Pad);
+  do {
+    Pad = Worklist.pop_back_val();
+    for (User *U : Pad->users())
+      if (auto *CI = dyn_cast<CallInst>(U)) {
+        if (shouldBeDebundled(CI))
+          CallsToDebundle.push_back(CI);
+      }
+      else if (auto *R = dyn_cast<CleanupReturnInst>(U)) {
+        if (R->unwindsToCaller())
+          UnwindsToCaller.push_back(R);
+        else
+          UnwindsToElsewhere.push_back(R);
+      } else {
+        DEBUG(U->dump());
+        llvm_unreachable("unexpected instruction with funclet bundle");
+      }
+
+    while (!UnwindsToCaller.empty()) {
+      auto *R = UnwindsToCaller.pop_back_val();
+      ReturnInst::Create(R->getContext(), nullptr, R);
+      R->eraseFromParent();
+    }
+
+    while (!UnwindsToElsewhere.empty()) {
+      auto *R = UnwindsToElsewhere.pop_back_val();
+      auto *BB = R->getUnwindDest();
+      Worklist.push_back(cast<CleanupPadInst>(&BB->front()));
+      BranchInst::Create(BB, R);
+      R->eraseFromParent();
+    }
+
+    Pad->replaceAllUsesWith(None);
+    Pad->eraseFromParent();
+  } while (!Worklist.empty());
+
+  for (auto *CI : CallsToDebundle)
+    ReplaceInstWithInst(CI, CallInst::Create(CI, {}));
+}
+
+static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None,
+                                              IntrinsicInst *EhSuspend,
+                                              SwitchInst *Switch) {
+  dbgs() << "-----------------------------\n";
+  EhSuspend->dump();
+
+  int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
+
+  if (auto Bundle = EhSuspend->getOperandBundle(LLVMContext::OB_funclet)) {
+    Value *FromPad = Bundle->Inputs[0];
+    deexceptionalizeFunclet(cast<CleanupPadInst>(FromPad), None);
+
+    auto *const BB = EhSuspend->getParent();
+    auto *const NewBB = BB->splitBasicBlock(EhSuspend);
+    EhSuspend->eraseFromParent();
+
+    ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
+    Switch->addCase(IndexVal, NewBB);
+  }
+
+  Switch->dump();
+
+  dbgs() << "-----------------------------\n";
+}
+
+namespace {
+struct CreateCloneResult {
+  Function &Func;
+  CoroIdInst *CoroId;
+};
+} // namespace
 
 // Create a resume clone by cloning the body of the original function, setting
 // new entry block and replacing coro.suspend an appropriate value to force
 // resume or cleanup pass for every suspend point.
-static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
-                             BasicBlock *ResumeEntry, int8_t FnIndex) {
+static CreateCloneResult createClone(Function &F, Twine Suffix,
+                                     coro::Shape &Shape,
+                                     BasicBlock *ResumeEntry, int8_t FnIndex) {
   Module *M = F.getParent();
   auto *FrameTy = Shape.FrameTy;
   auto *FnPtrTy = cast<PointerType>(FrameTy->getElementType(0));
@@ -302,14 +451,16 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   Value *OldVFrame = cast<Value>(VMap[Shape.CoroBegin]);
   OldVFrame->replaceAllUsesWith(NewVFrame);
 
+#if 0
   // Rewrite final suspend handling as it is not done via switch (allows to
   // remove final case from the switch, since it is undefined behavior to resume
   // the coroutine suspended at the final suspend point.
   if (Shape.HasFinalSuspend) {
     auto *Switch = cast<SwitchInst>(VMap[Shape.ResumeSwitch]);
-    bool IsDestroy = FnIndex != 0;
+    bool IsDestroy = FnIndex != coro::Shape::ResumeField;
     handleFinalSuspend(Builder, NewFramePtr, Shape, Switch, IsDestroy);
   }
+#endif
 
   // Replace coro suspend with the appropriate resume index.
   // Replacing coro.suspend with (0) will result in control flow proceeding to
@@ -324,16 +475,49 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   }
 
   // Remove coro.end intrinsics.
-  replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
-  replaceUnwindCoroEnds(Shape, VMap);
+  for (auto *CoroEnd : Shape.CoroEnds)
+    replaceFallthroughCoroEnd(CoroEnd, VMap);
+
+  if (FnIndex == coro::Shape::ResumeField) {
+    replaceUnwindCoroEnds(
+        Shape, VMap); // TODO: do the same with CoroEhSuspends instead
+    replaceEhSuspends(Shape, VMap);
+  } else {
+    // take care of landings
+
+    for (auto &Case : Switch->cases()) {
+      auto *BB = Case.getCaseSuccessor();
+      auto *NextBB = BB->getSingleSuccessor();
+      auto *Node = cast<PHINode>(NextBB->begin());
+      Node->dump();
+      Node->replaceAllUsesWith(Node->getIncomingValueForBlock(BB));
+      Node->eraseFromParent();
+      // Node->setIncomingValue(0, UndefValue::get(Node->getType()));
+      // Node->dump();
+    }
+
+    auto *None = ConstantTokenNone::get(Builder.getContext());
+    for (auto *EhSuspend : Shape.CoroEhSuspends)
+      handleEhSuspendInDestroyOrCleanup(
+          Shape, None, cast<IntrinsicInst>(VMap[EhSuspend]), Switch);
+  }
+#if 0
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
   // to suppress deallocation code.
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
                         /*Elide=*/FnIndex == 2);
-
+#endif
   NewF->setCallingConv(CallingConv::Fast);
 
-  return NewF;
+  return {*NewF, cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()])};
+}
+
+static CreateCloneResult createCleanupClone(Function &F, Twine Suffix,
+                                            CreateCloneResult DestroyClone) {
+  ValueToValueMapTy VMap;
+  Function *CleanupFunc = CloneFunction(&DestroyClone.Func, VMap);
+  CleanupFunc->setName(F.getName() + Suffix);
+  return {*CleanupFunc, cast<CoroIdInst>(VMap[DestroyClone.CoroId])};
 }
 
 static void removeCoroEnds(coro::Shape &Shape) {
@@ -344,6 +528,19 @@ static void removeCoroEnds(coro::Shape &Shape) {
   auto *False = ConstantInt::getFalse(Context);
 
   for (CoroEndInst *CE : Shape.CoroEnds) {
+    CE->replaceAllUsesWith(False);
+    CE->eraseFromParent();
+  }
+}
+
+static void removeEhSuspends(coro::Shape &Shape) {
+  if (Shape.CoroEhSuspends.empty())
+    return;
+
+  LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
+  auto *False = ConstantInt::getFalse(Context);
+
+  for (IntrinsicInst *CE : Shape.CoroEhSuspends) {
     CE->replaceAllUsesWith(False);
     CE->eraseFromParent();
   }
@@ -709,6 +906,7 @@ static void relocateInstructionBefore(CoroBeginInst *CoroBegin, Function &F) {
 }
 
 static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
+  removeUnreachableBlocks(F);
   coro::Shape Shape(F);
   if (!Shape.CoroBegin)
     return;
@@ -723,36 +921,48 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   if (Shape.CoroSuspends.empty()) {
     handleNoSuspendCoroutine(Shape.CoroBegin, Shape.FrameTy);
     removeCoroEnds(Shape);
+    removeEhSuspends(Shape);
     postSplitCleanup(F);
     coro::updateCallGraph(F, {}, CG, SCC);
     return;
   }
 
   auto *ResumeEntry = createResumeEntryBlock(F, Shape);
-  auto ResumeClone = createClone(F, ".resume", Shape, ResumeEntry, 0);
-  auto DestroyClone = createClone(F, ".destroy", Shape, ResumeEntry, 1);
-  auto CleanupClone = createClone(F, ".cleanup", Shape, ResumeEntry, 2);
+  CreateCloneResult ResumeClone =
+      createClone(F, ".resume", Shape, ResumeEntry, coro::Shape::ResumeField);
+  CreateCloneResult DestroyClone =
+      createClone(F, ".destroy", Shape, ResumeEntry, coro::Shape::DestroyField);
+  CreateCloneResult CleanupClone =
+      createCleanupClone(F, ".cleanup", DestroyClone);
+
+  coro::replaceCoroFree(ResumeClone.CoroId);
+  coro::replaceCoroFree(DestroyClone.CoroId);
+  coro::replaceCoroFree(CleanupClone.CoroId, /*Elide=*/true);
 
   // We no longer need coro.end in F.
   removeCoroEnds(Shape);
+  removeEhSuspends(Shape);
 
   postSplitCleanup(F);
-  postSplitCleanup(*ResumeClone);
-  postSplitCleanup(*DestroyClone);
-  postSplitCleanup(*CleanupClone);
+  postSplitCleanup(ResumeClone.Func);
+  postSplitCleanup(DestroyClone.Func);
+  postSplitCleanup(CleanupClone.Func);
 
-  addMustTailToCoroResumes(*ResumeClone);
+  addMustTailToCoroResumes(ResumeClone.Func);
 
   // Store addresses resume/destroy/cleanup functions in the coroutine frame.
-  updateCoroFrame(Shape, ResumeClone, DestroyClone, CleanupClone);
+  updateCoroFrame(Shape, &ResumeClone.Func, &DestroyClone.Func,
+                  &CleanupClone.Func);
 
   // Create a constant array referring to resume/destroy/clone functions pointed
   // by the last argument of @llvm.coro.info, so that CoroElide pass can
   // determined correct function to call.
-  setCoroInfo(F, Shape.CoroBegin, {ResumeClone, DestroyClone, CleanupClone});
+  setCoroInfo(F, Shape.CoroBegin,
+              {&ResumeClone.Func, &DestroyClone.Func, &CleanupClone.Func});
 
   // Update call graph and add the functions we created to the SCC.
-  coro::updateCallGraph(F, {ResumeClone, DestroyClone, CleanupClone}, CG, SCC);
+  coro::updateCallGraph(
+      F, {&ResumeClone.Func, &DestroyClone.Func, &CleanupClone.Func}, CG, SCC);
 }
 
 // When we see the coroutine the first time, we insert an indirect call to a
