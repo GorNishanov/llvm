@@ -363,17 +363,18 @@ static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None,
 
   int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
 
+  auto *const BB = EhSuspend->getParent();
+  auto *const NewBB = BB->splitBasicBlock(EhSuspend);
   if (auto Bundle = EhSuspend->getOperandBundle(LLVMContext::OB_funclet)) {
     Value *FromPad = Bundle->Inputs[0];
     deexceptionalizeFunclet(cast<CleanupPadInst>(FromPad), None);
-
-    auto *const BB = EhSuspend->getParent();
-    auto *const NewBB = BB->splitBasicBlock(EhSuspend);
-    EhSuspend->eraseFromParent();
-
-    ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
-    Switch->addCase(IndexVal, NewBB);
+    assert(EhSuspend->user_empty());
   }
+  auto *False = ConstantInt::getTrue(EhSuspend->getContext());
+  EhSuspend->replaceAllUsesWith(False);
+  EhSuspend->eraseFromParent();
+  ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
+  Switch->addCase(IndexVal, NewBB);
 
   Switch->dump();
 
