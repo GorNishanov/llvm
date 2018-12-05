@@ -361,7 +361,7 @@ static void deexceptionalizeFunclet(CleanupPadInst *Pad, Value *None) {
 }
 
 static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None,
-                                              IntrinsicInst *EhSuspend,
+                                              CoroEhSuspendInst *EhSuspend,
                                               SwitchInst *Switch) {
   dbgs() << "-----------------------------\n";
   EhSuspend->dump();
@@ -376,8 +376,10 @@ static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None,
     assert(EhSuspend->user_empty());
   }
   auto *False = ConstantInt::getTrue(EhSuspend->getContext());
+  auto *CoroSave = EhSuspend->getCoroSave();
   EhSuspend->replaceAllUsesWith(False);
   EhSuspend->eraseFromParent();
+  CoroSave->eraseFromParent();
   ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
   Switch->addCase(IndexVal, NewBB);
 
@@ -505,7 +507,7 @@ static CreateCloneResult createClone(Function &F, Twine Suffix,
     auto *None = ConstantTokenNone::get(Builder.getContext());
     for (auto *EhSuspend : Shape.CoroEhSuspends)
       handleEhSuspendInDestroyOrCleanup(
-          Shape, None, cast<IntrinsicInst>(VMap[EhSuspend]), Switch);
+          Shape, None, cast<CoroEhSuspendInst>(VMap[EhSuspend]), Switch);
   }
 #if 0
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
@@ -546,9 +548,11 @@ static void removeEhSuspends(coro::Shape &Shape) {
   LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
   auto *False = ConstantInt::getFalse(Context);
 
-  for (IntrinsicInst *CE : Shape.CoroEhSuspends) {
+  for (CoroEhSuspendInst *CE : Shape.CoroEhSuspends) {
+    auto *CoroSave = CE->getCoroSave();
     CE->replaceAllUsesWith(False);
     CE->eraseFromParent();
+    CoroSave->eraseFromParent();
   }
 }
 
