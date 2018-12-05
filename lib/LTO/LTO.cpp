@@ -221,8 +221,14 @@ void llvm::computeLTOCacheKey(
   // Imported functions may introduce new uses of type identifier resolutions,
   // so we need to collect their used resolutions as well.
   for (auto &ImpM : ImportList)
-    for (auto &ImpF : ImpM.second)
-      AddUsedThings(Index.findSummaryInModule(ImpF, ImpM.first()));
+    for (auto &ImpF : ImpM.second) {
+      GlobalValueSummary *S = Index.findSummaryInModule(ImpF, ImpM.first());
+      AddUsedThings(S);
+      // If this is an alias, we also care about any types/etc. that the aliasee
+      // may reference.
+      if (auto *AS = dyn_cast_or_null<AliasSummary>(S))
+        AddUsedThings(AS->getBaseObject());
+    }
 
   auto AddTypeIdSummary = [&](StringRef TId, const TypeIdSummary &S) {
     AddString(TId);
@@ -359,7 +365,10 @@ static void thinLTOInternalizeAndPromoteGUID(
                // Ignore local and appending linkage values since the linker
                // doesn't resolve them.
                !GlobalValue::isLocalLinkage(S->linkage()) &&
-               !GlobalValue::isAppendingLinkage(S->linkage()))
+               S->linkage() != GlobalValue::AppendingLinkage &&
+               // We can't internalize available_externally globals because this
+               // can break function pointer equality.
+               S->linkage() != GlobalValue::AvailableExternallyLinkage)
       S->setLinkage(GlobalValue::InternalLinkage);
   }
 }
