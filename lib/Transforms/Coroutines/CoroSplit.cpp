@@ -201,9 +201,10 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
 
   auto *True = ConstantInt::getTrue(Context);
   for (IntrinsicInst *CE : Shape.CoroEhSuspends) {
-    auto *NewCE = cast<IntrinsicInst>(VMap[CE]);
+    auto *NewCE = cast<CoroEhSuspendInst>(VMap[CE]);
+    auto *CoroSave = NewCE->getCoroSave();
 
-    Builder.SetInsertPoint(NewCE);
+    Builder.SetInsertPoint(CoroSave);
 
     // Final suspend point also stores zero in ResumeFnAddr.
     auto *ResumeFnAddr = Builder.CreateConstInBoundsGEP2_32(
@@ -218,6 +219,8 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
         FrameTy, FramePtr, 0, coro::Shape::IndexField, "index.addr");
     Builder.CreateStore(IndexVal, GepIndex);
 
+    Builder.SetInsertPoint(NewCE);
+
     // If coro.end has an associated bundle, add cleanupret instruction.
     if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
       Value *FromPad = Bundle->Inputs[0];
@@ -228,6 +231,8 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
 
     NewCE->replaceAllUsesWith(True);
     NewCE->eraseFromParent();
+
+    CoroSave->eraseFromParent(); // TODO: check for only one
   }
 }
 
