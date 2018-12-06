@@ -28,6 +28,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
+#include "llvm/Analysis/EHPersonalities.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Attributes.h"
@@ -314,19 +315,44 @@ static bool shouldBeDebundled(CallInst *I) {
   }
 }
 
-static void deexceptionalizeFunclet(CleanupPadInst *Pad, Value *None) {
+static void deexceptionalizeFunclets(Function &F, ValueToValueMapTy &VMap,
+                                     coro::Shape &Shape) {
+  if (Shape.CoroEhSuspends.empty())
+    return;
+
+  if (!F.hasPersonalityFn())
+    return;
+
+  auto Personality = classifyEHPersonality(F.getPersonalityFn());
+  if (!isFuncletEHPersonality(Personality))
+    return;
+
   SmallVector<CallInst *, 4> CallsToDebundle;
+  SmallVector<InvokeInst *, 4> InvokesToDebundle;
   SmallVector<CleanupPadInst *, 2> Worklist;
   SmallVector<CleanupReturnInst *, 2> UnwindsToCaller;
   SmallVector<CleanupReturnInst *, 2> UnwindsToElsewhere;
+  SmallPtrSet<BasicBlock *, 2> Done;
 
-  Worklist.push_back(Pad);
+  for (auto *EhSuspend : Shape.CoroEhSuspends) {
+    auto *Remapped = cast<CoroEhSuspendInst>(VMap[EhSuspend]);
+    if (auto Bundle = Remapped->getOperandBundle(LLVMContext::OB_funclet)) {
+      Value *FromPad = Bundle->Inputs[0];
+      Worklist.push_back(cast<CleanupPadInst>(FromPad));
+      assert(Remapped->user_empty());
+    }
+  }
+
   do {
-    Pad = Worklist.pop_back_val();
+    auto Pad = Worklist.pop_back_val();
+    Done.insert(Pad->getParent());
     for (User *U : Pad->users())
       if (auto *CI = dyn_cast<CallInst>(U)) {
         if (shouldBeDebundled(CI))
           CallsToDebundle.push_back(CI);
+      }
+      else if (auto *Inv = dyn_cast<InvokeInst>(U)) {
+        InvokesToDebundle.push_back(Inv);
       }
       else if (auto *R = dyn_cast<CleanupReturnInst>(U)) {
         if (R->unwindsToCaller())
@@ -347,45 +373,40 @@ static void deexceptionalizeFunclet(CleanupPadInst *Pad, Value *None) {
     while (!UnwindsToElsewhere.empty()) {
       auto *R = UnwindsToElsewhere.pop_back_val();
       auto *BB = R->getUnwindDest();
-      Worklist.push_back(cast<CleanupPadInst>(&BB->front()));
+      if (Done.count(BB) == 0)
+        Worklist.push_back(cast<CleanupPadInst>(&BB->front()));
       BranchInst::Create(BB, R);
       R->eraseFromParent();
     }
+  } while (!Worklist.empty());
 
+  auto *None = ConstantTokenNone::get(F.getContext());
+  for (auto *BB : Done) {
+    auto *Pad = cast<CleanupPadInst>(&BB->front());
     Pad->replaceAllUsesWith(None);
     Pad->eraseFromParent();
-  } while (!Worklist.empty());
+  }
 
   for (auto *CI : CallsToDebundle)
     ReplaceInstWithInst(CI, CallInst::Create(CI, {}));
+  for (auto *Inv : InvokesToDebundle)
+    ReplaceInstWithInst(Inv, InvokeInst::Create(Inv, {}));
 }
 
-static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape, Value *None,
+static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape,
                                               CoroEhSuspendInst *EhSuspend,
                                               SwitchInst *Switch) {
-  dbgs() << "-----------------------------\n";
-  EhSuspend->dump();
-
-  int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
+  //int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
 
   auto *const BB = EhSuspend->getParent();
   auto *const NewBB = BB->splitBasicBlock(EhSuspend);
-  if (auto Bundle = EhSuspend->getOperandBundle(LLVMContext::OB_funclet)) {
-    Value *FromPad = Bundle->Inputs[0];
-    deexceptionalizeFunclet(cast<CleanupPadInst>(FromPad), None);
-    assert(EhSuspend->user_empty());
-  }
   auto *False = ConstantInt::getTrue(EhSuspend->getContext());
   auto *CoroSave = EhSuspend->getCoroSave();
   EhSuspend->replaceAllUsesWith(False);
   EhSuspend->eraseFromParent();
   CoroSave->eraseFromParent();
-  ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
+  ConstantInt *IndexVal = Shape.getIndex(Shape.FinalSuspendIndex--);
   Switch->addCase(IndexVal, NewBB);
-
-  Switch->dump();
-
-  dbgs() << "-----------------------------\n";
 }
 
 namespace {
@@ -504,10 +525,10 @@ static CreateCloneResult createClone(Function &F, Twine Suffix,
       // Node->dump();
     }
 
-    auto *None = ConstantTokenNone::get(Builder.getContext());
+    deexceptionalizeFunclets(F, VMap, Shape);
     for (auto *EhSuspend : Shape.CoroEhSuspends)
       handleEhSuspendInDestroyOrCleanup(
-          Shape, None, cast<CoroEhSuspendInst>(VMap[EhSuspend]), Switch);
+          Shape, cast<CoroEhSuspendInst>(VMap[EhSuspend]), Switch);
   }
 #if 0
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
