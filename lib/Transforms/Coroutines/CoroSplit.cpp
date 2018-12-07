@@ -189,6 +189,33 @@ static void replaceFallthroughCoroEnd(IntrinsicInst *End,
 
 // In Resumers, we replace unwind coro.end with True to force the immediate
 // unwind to caller.
+static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
+  if (Shape.CoroEnds.empty())
+    return;
+
+  LLVMContext &Context = Shape.CoroEnds.front()->getContext();
+  auto *True = ConstantInt::getTrue(Context);
+  for (CoroEndInst *CE : Shape.CoroEnds) {
+    if (!CE->isUnwind())
+      continue;
+
+    auto *NewCE = cast<IntrinsicInst>(VMap[CE]);
+
+    // If coro.end has an associated bundle, add cleanupret instruction.
+    if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
+      Value *FromPad = Bundle->Inputs[0];
+      auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
+      NewCE->getParent()->splitBasicBlock(NewCE);
+      CleanupRet->getParent()->getTerminator()->eraseFromParent();
+    }
+
+    NewCE->replaceAllUsesWith(True);
+    NewCE->eraseFromParent();
+  }
+}
+
+// In Resumers, we replace coro.eh.suspend with True to force the immediate
+// unwind to caller.
 static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
   if (Shape.CoroEhSuspends.empty())
     return;
@@ -236,66 +263,6 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
     CoroSave->eraseFromParent(); // TODO: check for only one
   }
 }
-
-// In Resumers, we replace unwind coro.end with True to force the immediate
-// unwind to caller.
-static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
-  if (Shape.CoroEnds.empty())
-    return;
-
-  LLVMContext &Context = Shape.CoroEnds.front()->getContext();
-  auto *True = ConstantInt::getTrue(Context);
-  for (CoroEndInst *CE : Shape.CoroEnds) {
-    if (!CE->isUnwind())
-      continue;
-
-    auto *NewCE = cast<IntrinsicInst>(VMap[CE]);
-
-    // If coro.end has an associated bundle, add cleanupret instruction.
-    if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
-      Value *FromPad = Bundle->Inputs[0];
-      auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
-      NewCE->getParent()->splitBasicBlock(NewCE);
-      CleanupRet->getParent()->getTerminator()->eraseFromParent();
-    }
-
-    NewCE->replaceAllUsesWith(True);
-    NewCE->eraseFromParent();
-  }
-}
-
-#if 0
-// Rewrite final suspend point handling. We do not use suspend index to
-// represent the final suspend point. Instead we zero-out ResumeFnAddr in the
-// coroutine frame, since it is undefined behavior to resume a coroutine
-// suspended at the final suspend point. Thus, in the resume function, we can
-// simply remove the last case (when coro::Shape is built, the final suspend
-// point (if present) is always the last element of CoroSuspends array).
-// In the destroy function, we add a code sequence to check if ResumeFnAddress
-// is Null, and if so, jump to the appropriate label to handle cleanup from the
-// final suspend point.
-static void handleFinalSuspend(IRBuilder<> &Builder, Value *FramePtr,
-                               coro::Shape &Shape, SwitchInst *Switch,
-                               bool IsDestroy) {
-  assert(Shape.HasFinalSuspend);
-  auto FinalCaseIt = std::prev(Switch->case_end());
-  BasicBlock *ResumeBB = FinalCaseIt->getCaseSuccessor();
-  Switch->removeCase(FinalCaseIt);
-  if (IsDestroy) {
-    BasicBlock *OldSwitchBB = Switch->getParent();
-    auto *NewSwitchBB = OldSwitchBB->splitBasicBlock(Switch, "Switch");
-    Builder.SetInsertPoint(OldSwitchBB->getTerminator());
-    auto *GepIndex = Builder.CreateConstInBoundsGEP2_32(Shape.FrameTy, FramePtr,
-                                                        0, 0, "ResumeFn.addr");
-    auto *Load = Builder.CreateLoad(GepIndex);
-    auto *NullPtr =
-        ConstantPointerNull::get(cast<PointerType>(Load->getType()));
-    auto *Cond = Builder.CreateICmpEQ(Load, NullPtr);
-    Builder.CreateCondBr(Cond, ResumeBB, NewSwitchBB);
-    OldSwitchBB->getTerminator()->eraseFromParent();
-  }
-}
-#endif
 
 // We debundle all calls except for coroutines intrinsics.
 static bool shouldBeDebundled(CallInst *I) {
@@ -480,17 +447,6 @@ static CreateCloneResult createClone(Function &F, Twine Suffix,
   Value *OldVFrame = cast<Value>(VMap[Shape.CoroBegin]);
   OldVFrame->replaceAllUsesWith(NewVFrame);
 
-#if 0
-  // Rewrite final suspend handling as it is not done via switch (allows to
-  // remove final case from the switch, since it is undefined behavior to resume
-  // the coroutine suspended at the final suspend point.
-  if (Shape.HasFinalSuspend) {
-    auto *Switch = cast<SwitchInst>(VMap[Shape.ResumeSwitch]);
-    bool IsDestroy = FnIndex != coro::Shape::ResumeField;
-    handleFinalSuspend(Builder, NewFramePtr, Shape, Switch, IsDestroy);
-  }
-#endif
-
   // Replace coro suspend with the appropriate resume index.
   // Replacing coro.suspend with (0) will result in control flow proceeding to
   // a resume label associated with a suspend point, replacing it with (1) will
@@ -504,25 +460,19 @@ static CreateCloneResult createClone(Function &F, Twine Suffix,
   }
 
   // Remove coro.end intrinsics.
-  for (auto *CoroEnd : Shape.CoroEnds)
-    replaceFallthroughCoroEnd(CoroEnd, VMap);
+  replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
 
   if (FnIndex == coro::Shape::ResumeField) {
-    replaceUnwindCoroEnds(
-        Shape, VMap); // TODO: do the same with CoroEhSuspends instead
+    replaceUnwindCoroEnds(Shape, VMap);
     replaceEhSuspends(Shape, VMap);
   } else {
-    // take care of landings
-
+    // take care of landings ??? What does this mean ???
     for (auto &Case : Switch->cases()) {
       auto *BB = Case.getCaseSuccessor();
       auto *NextBB = BB->getSingleSuccessor();
       auto *Node = cast<PHINode>(NextBB->begin());
-      Node->dump();
       Node->replaceAllUsesWith(Node->getIncomingValueForBlock(BB));
       Node->eraseFromParent();
-      // Node->setIncomingValue(0, UndefValue::get(Node->getType()));
-      // Node->dump();
     }
 
     deexceptionalizeFunclets(F, VMap, Shape);
