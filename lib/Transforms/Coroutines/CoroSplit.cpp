@@ -249,7 +249,7 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
 
     Builder.SetInsertPoint(NewCE);
 
-    // If coro.end has an associated bundle, add cleanupret instruction.
+    // If coro.eh.suspend has an associated bundle, add cleanupret instruction.
     if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
       Value *FromPad = Bundle->Inputs[0];
       auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
