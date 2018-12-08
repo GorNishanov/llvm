@@ -321,6 +321,10 @@ static void deexceptionalizeFunclets(Function &F, ValueToValueMapTy &VMap,
       else if (auto *Inv = dyn_cast<InvokeInst>(U)) {
         InvokesToDebundle.push_back(Inv);
       }
+      else if (isa<CleanupPadInst>(U) || isa<CatchSwitchInst>(U)) {
+        // This is an inner EH pad. Leave it as is, later we will RAUW the Pad 
+        // with None. That will clear the "within" field.
+      }
       else if (auto *R = dyn_cast<CleanupReturnInst>(U)) {
         if (R->unwindsToCaller())
           UnwindsToCaller.push_back(R);
@@ -461,9 +465,9 @@ static CreateCloneResult createClone(Function &F, Twine Suffix,
 
   // Remove coro.end intrinsics.
   replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
+  replaceUnwindCoroEnds(Shape, VMap);
 
   if (FnIndex == coro::Shape::ResumeField) {
-    replaceUnwindCoroEnds(Shape, VMap);
     replaceEhSuspends(Shape, VMap);
   } else {
     // take care of landings ??? What does this mean ???
