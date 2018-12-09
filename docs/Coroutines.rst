@@ -1094,7 +1094,7 @@ Semantics:
 This intrinsic is lowered when a coroutine is split into
 the start, resume and destroy parts. In the start part, it is a no-op,
 in resume part, it is replaced with "unwind to caller" instruction appropriate
-for the personality of the function. 
+for the EH personality of the function. 
 
 In the destroy part, the rest of the code after `coro.eh.suspend` will
 become part of the cleanup executed when `coro.destroy` is called when coroutine
