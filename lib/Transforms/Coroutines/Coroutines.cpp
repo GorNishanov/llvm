@@ -220,7 +220,6 @@ static void clear(coro::Shape &Shape) {
   Shape.AllocaSpillBlock = nullptr;
   Shape.ResumeSwitch = nullptr;
   Shape.PromiseAlloca = nullptr;
-  //Shape.HasFinalSuspend = false;
 }
 
 static CoroSaveInst *createCoroSave(CoroBeginInst *CoroBegin,
@@ -236,7 +235,6 @@ static CoroSaveInst *createCoroSave(CoroBeginInst *CoroBegin,
 
 // Collect "interesting" coroutine intrinsics.
 void coro::Shape::buildFrom(Function &F) {
-//  size_t FinalSuspendIndex = 0;
   clear(*this);
   SmallVector<CoroFrameInst *, 8> CoroFrames;
   SmallVector<CoroSaveInst *, 2> UnusedCoroSaves;
@@ -260,15 +258,6 @@ void coro::Shape::buildFrom(Function &F) {
         break;
       case Intrinsic::coro_suspend:
         CoroSuspends.push_back(cast<CoroSuspendInst>(II));
-#if 0
-        if (CoroSuspends.back()->isFinal()) {
-          if (HasFinalSuspend)
-            report_fatal_error(
-              "Only one suspend point can be marked as final");
-          HasFinalSuspend = true;
-          FinalSuspendIndex = CoroSuspends.size() - 1;
-        }
-#endif
         break;
       case Intrinsic::coro_begin: {
         auto CB = cast<CoroBeginInst>(II);
@@ -340,12 +329,7 @@ void coro::Shape::buildFrom(Function &F) {
   for (CoroSuspendInst *CS : CoroSuspends)
     if (!CS->getCoroSave())
       createCoroSave(CoroBegin, CS);
-#if 0
-  // Move final suspend to be the last element in the CoroSuspends vector.
-  if (HasFinalSuspend &&
-      FinalSuspendIndex != CoroSuspends.size() - 1)
-    std::swap(CoroSuspends[FinalSuspendIndex], CoroSuspends.back());
-#endif
+
   // Remove orphaned coro.saves.
   for (CoroSaveInst *CoroSave : UnusedCoroSaves)
     CoroSave->eraseFromParent();

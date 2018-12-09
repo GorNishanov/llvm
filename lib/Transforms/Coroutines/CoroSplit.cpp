@@ -226,7 +226,7 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
   LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
   IRBuilder<> Builder(Context);
   int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
-
+ 
   auto *True = ConstantInt::getTrue(Context);
   for (IntrinsicInst *CE : Shape.CoroEhSuspends) {
     auto *NewCE = cast<CoroEhSuspendInst>(VMap[CE]);
@@ -237,12 +237,11 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
     // Final suspend point also stores zero in ResumeFnAddr.
     auto *ResumeFnAddr = Builder.CreateConstInBoundsGEP2_32(
         FrameTy, FramePtr, 0, 0, "ResumeFn.addr");
-    auto *NullPtr = ConstantPointerNull::get(
-        cast<PointerType>( // TODO: move out of the loop
-            cast<PointerType>(ResumeFnAddr->getType())->getElementType()));
+    auto *NullPtr = ConstantPointerNull::get(cast<PointerType>(
+        cast<PointerType>(ResumeFnAddr->getType())->getElementType()));
     Builder.CreateStore(NullPtr, ResumeFnAddr);
-    ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
 
+    ConstantInt *IndexVal = Shape.getIndex(FinalSuspendIndex--);
     auto *GepIndex = Builder.CreateConstInBoundsGEP2_32(
         FrameTy, FramePtr, 0, coro::Shape::IndexField, "index.addr");
     Builder.CreateStore(IndexVal, GepIndex);
@@ -367,8 +366,6 @@ static void deexceptionalizeFunclets(Function &F, ValueToValueMapTy &VMap,
 static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape,
                                               CoroEhSuspendInst *EhSuspend,
                                               SwitchInst *Switch) {
-  //int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
-
   auto *const BB = EhSuspend->getParent();
   auto *const NewBB = BB->splitBasicBlock(EhSuspend);
   auto *False = ConstantInt::getTrue(EhSuspend->getContext());
@@ -516,11 +513,14 @@ static void removeCoroEnds(coro::Shape &Shape) {
   }
 }
 
+// Remove coro.eh.suspends in the start function. 
 static void removeEhSuspends(coro::Shape &Shape) {
   if (Shape.CoroEhSuspends.empty())
     return;
 
   LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
+  // Replacing coro.eh.suspend with false, allows the unwind proceed over to
+  // the rest of the cleanup (on Itanium EH model). 
   auto *False = ConstantInt::getFalse(Context);
 
   for (CoroEhSuspendInst *CE : Shape.CoroEhSuspends) {
@@ -903,10 +903,9 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
 
   // If there are no suspend points, no split required, just remove
   // the allocation and deallocation blocks, they are not needed.
-  if (Shape.CoroSuspends.empty()) {
+  if (Shape.CoroSuspends.empty() && Shape.CoroEhSuspends.empty()) {
     handleNoSuspendCoroutine(Shape.CoroBegin, Shape.FrameTy);
     removeCoroEnds(Shape);
-    removeEhSuspends(Shape);
     postSplitCleanup(F);
     coro::updateCallGraph(F, {}, CG, SCC);
     return;
