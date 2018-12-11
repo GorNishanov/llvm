@@ -123,14 +123,9 @@ findBuildID(const object::ELFFile<ELFT> &In) {
     if (Phdr.p_type != PT_NOTE)
       continue;
     Error Err = Error::success();
-    if (Err)
-      llvm_unreachable("Error::success() was an error.");
-    for (const auto &Note : In.notes(Phdr, Err)) {
-      if (Err)
-        return std::move(Err);
+    for (const auto &Note : In.notes(Phdr, Err))
       if (Note.getType() == NT_GNU_BUILD_ID && Note.getName() == ELF_NOTE_GNU)
         return Note.getDesc();
-    }
     if (Err)
       return std::move(Err);
   }
@@ -415,10 +410,10 @@ static void handleArgs(const CopyConfig &Config, Object &Obj,
     };
 
   // Explicit copies:
-  if (!Config.OnlyKeep.empty()) {
+  if (!Config.OnlySection.empty()) {
     RemovePred = [&Config, RemovePred, &Obj](const SectionBase &Sec) {
       // Explicitly keep these sections regardless of previous removes.
-      if (is_contained(Config.OnlyKeep, Sec.Name))
+      if (is_contained(Config.OnlySection, Sec.Name))
         return false;
 
       // Allow all implicit removes.

@@ -19148,34 +19148,32 @@ static SDValue LowerIntVSETCC_AVX512(SDValue Op, SelectionDAG &DAG) {
   return DAG.getSetCC(dl, VT, Op0, Op1, SetCCOpcode);
 }
 
-/// Try to turn a VSETULT into a VSETULE by modifying its second
-/// operand \p Op1.  If non-trivial (for example because it's not constant)
-/// return an empty value.
-static SDValue ChangeVSETULTtoVSETULE(const SDLoc &dl, SDValue Op1,
-                                      SelectionDAG &DAG) {
-  BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(Op1.getNode());
+/// Given a simple buildvector constant, return a new vector constant with each
+/// element decremented. If decrementing would result in underflow or this
+/// is not a simple vector constant, return an empty value.
+static SDValue decrementVectorConstant(SDValue V, SelectionDAG &DAG) {
+  auto *BV = dyn_cast<BuildVectorSDNode>(V.getNode());
   if (!BV)
     return SDValue();
 
-  MVT VT = Op1.getSimpleValueType();
-  MVT EVT = VT.getVectorElementType();
-  unsigned n = VT.getVectorNumElements();
-  SmallVector<SDValue, 8> ULTOp1;
-
-  for (unsigned i = 0; i < n; ++i) {
-    ConstantSDNode *Elt = dyn_cast<ConstantSDNode>(BV->getOperand(i));
-    if (!Elt || Elt->isOpaque() || Elt->getSimpleValueType(0) != EVT)
+  MVT VT = V.getSimpleValueType();
+  MVT EltVT = VT.getVectorElementType();
+  unsigned NumElts = VT.getVectorNumElements();
+  SmallVector<SDValue, 8> NewVecC;
+  SDLoc DL(V);
+  for (unsigned i = 0; i < NumElts; ++i) {
+    auto *Elt = dyn_cast<ConstantSDNode>(BV->getOperand(i));
+    if (!Elt || Elt->isOpaque() || Elt->getSimpleValueType(0) != EltVT)
       return SDValue();
 
     // Avoid underflow.
-    APInt Val = Elt->getAPIntValue();
-    if (Val == 0)
+    if (Elt->getAPIntValue().isNullValue())
       return SDValue();
 
-    ULTOp1.push_back(DAG.getConstant(Val - 1, dl, EVT));
+    NewVecC.push_back(DAG.getConstant(Elt->getAPIntValue() - 1, DL, EltVT));
   }
 
-  return DAG.getBuildVector(VT, dl, ULTOp1);
+  return DAG.getBuildVector(VT, DL, NewVecC);
 }
 
 /// As another special case, use PSUBUS[BW] when it's profitable. E.g. for
@@ -19204,7 +19202,7 @@ static SDValue LowerVSETCCWithSUBUS(SDValue Op0, SDValue Op1, MVT VT,
     // Only do this pre-AVX since vpcmp* is no longer destructive.
     if (Subtarget.hasAVX())
       return SDValue();
-    SDValue ULEOp1 = ChangeVSETULTtoVSETULE(dl, Op1, DAG);
+    SDValue ULEOp1 = decrementVectorConstant(Op1, DAG);
     if (!ULEOp1)
       return SDValue();
     Op1 = ULEOp1;
@@ -21932,10 +21930,19 @@ SDValue X86TargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
     case ADX: {
       SDVTList CFVTs = DAG.getVTList(Op->getValueType(0), MVT::i32);
       SDVTList VTs = DAG.getVTList(Op.getOperand(2).getValueType(), MVT::i32);
-      SDValue GenCF = DAG.getNode(X86ISD::ADD, dl, CFVTs, Op.getOperand(1),
-                                  DAG.getConstant(-1, dl, MVT::i8));
-      SDValue Res = DAG.getNode(IntrData->Opc0, dl, VTs, Op.getOperand(2),
-                                Op.getOperand(3), GenCF.getValue(1));
+
+      SDValue Res;
+      // If the carry in is zero, then we should just use ADD/SUB instead of
+      // ADC/SBB.
+      if (isNullConstant(Op.getOperand(1))) {
+        Res = DAG.getNode(IntrData->Opc1, dl, VTs, Op.getOperand(2),
+                          Op.getOperand(3));
+      } else {
+        SDValue GenCF = DAG.getNode(X86ISD::ADD, dl, CFVTs, Op.getOperand(1),
+                                    DAG.getConstant(-1, dl, MVT::i8));
+        Res = DAG.getNode(IntrData->Opc0, dl, VTs, Op.getOperand(2),
+                          Op.getOperand(3), GenCF.getValue(1));
+      }
       SDValue SetCC = getSETCC(X86::COND_B, Res.getValue(1), dl, DAG);
       SDValue Results[] = { SetCC, Res };
       return DAG.getMergeValues(Results, dl);
@@ -24069,47 +24076,50 @@ static SDValue LowerScalarImmediateShift(SDValue Op, SelectionDAG &DAG,
 static SDValue IsSplatVector(SDValue V, int &SplatIdx) {
   V = peekThroughEXTRACT_SUBVECTORs(V);
 
-  // Check if this is a splat build_vector node.
-  if (BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(V)) {
-    BitVector BVUndefElts;
-    SDValue SplatAmt = BV->getSplatValue(&BVUndefElts);
+  unsigned Opcode = V.getOpcode();
+  switch (Opcode) {
+  case ISD::BUILD_VECTOR: {
+    BitVector UndefElts;
+    SDValue SplatAmt = cast<BuildVectorSDNode>(V)->getSplatValue(&UndefElts);
     if (SplatAmt && !SplatAmt.isUndef()) {
-      for (int i = 0, e = BVUndefElts.size(); i != e; ++i)
-        if (!BVUndefElts[i]) {
+      for (int i = 0, e = UndefElts.size(); i != e; ++i)
+        if (!UndefElts[i]) {
           SplatIdx = i;
           return V;
         }
     }
-    return SDValue();
+    break;
   }
-
-  // Check for SUB(SPLAT_BV, SPLAT) cases from rotate patterns.
-  if (V.getOpcode() == ISD::SUB) {
+  case ISD::VECTOR_SHUFFLE: {
+    // Check if this is a shuffle node doing a splat.
+    auto *SVN = cast<ShuffleVectorSDNode>(V);
+    if (!SVN->isSplat())
+      break;
+    int Idx = SVN->getSplatIndex();
+    int NumElts = V.getValueType().getVectorNumElements();
+    SplatIdx = Idx % NumElts;
+    return V.getOperand(Idx / NumElts);
+  }
+  case ISD::SUB: {
     SDValue LHS = peekThroughEXTRACT_SUBVECTORs(V.getOperand(0));
     SDValue RHS = peekThroughEXTRACT_SUBVECTORs(V.getOperand(1));
 
     // Ensure that the corresponding splat BV element is not UNDEF.
     BitVector UndefElts;
-    BuildVectorSDNode *BV0 = dyn_cast<BuildVectorSDNode>(LHS);
-    ShuffleVectorSDNode *SVN1 = dyn_cast<ShuffleVectorSDNode>(RHS);
+    auto *BV0 = dyn_cast<BuildVectorSDNode>(LHS);
+    auto *SVN1 = dyn_cast<ShuffleVectorSDNode>(RHS);
     if (BV0 && SVN1 && BV0->getSplatValue(&UndefElts) && SVN1->isSplat()) {
       int Idx = SVN1->getSplatIndex();
       if (!UndefElts[Idx]) {
         SplatIdx = Idx;
         return V;
       }
-      return SDValue();
     }
+    break;
+  }
   }
 
-  // Check if this is a shuffle node doing a splat.
-  ShuffleVectorSDNode *SVN = dyn_cast<ShuffleVectorSDNode>(V);
-  if (!SVN || !SVN->isSplat())
-    return SDValue();
-  int Idx = SVN->getSplatIndex();
-  int NumElts = V.getValueType().getVectorNumElements();
-  SplatIdx = Idx % NumElts;
-  return V.getOperand(Idx / NumElts);
+  return SDValue();
 }
 
 static SDValue GetSplatValue(SDValue V, const SDLoc &dl,
@@ -39992,21 +40002,6 @@ static SDValue combineADC(SDNode *N, SelectionDAG &DAG,
   return SDValue();
 }
 
-/// Materialize "setb reg" as "sbb reg,reg", since it produces an all-ones bit
-/// which is more useful than 0/1 in some cases.
-static SDValue materializeSBB(SDNode *N, SDValue EFLAGS, SelectionDAG &DAG) {
-  SDLoc DL(N);
-  // "Condition code B" is also known as "the carry flag" (CF).
-  SDValue CF = DAG.getConstant(X86::COND_B, DL, MVT::i8);
-  SDValue SBB = DAG.getNode(X86ISD::SETCC_CARRY, DL, MVT::i8, CF, EFLAGS);
-  MVT VT = N->getSimpleValueType(0);
-  if (VT == MVT::i8)
-    return DAG.getNode(ISD::AND, DL, VT, SBB, DAG.getConstant(1, DL, VT));
-
-  assert(VT == MVT::i1 && "Unexpected type for SETCC node");
-  return DAG.getNode(ISD::TRUNCATE, DL, MVT::i1, SBB);
-}
-
 /// If this is an add or subtract where one operand is produced by a cmp+setcc,
 /// then try to convert it to an ADC or SBB. This replaces TEST+SET+{ADD/SUB}
 /// with CMP+{ADC, SBB}.
@@ -40077,13 +40072,11 @@ static SDValue combineAddOrSubToADCOrSBB(SDNode *N, SelectionDAG &DAG) {
   }
 
   if (CC == X86::COND_B) {
-    // X + SETB Z --> X + (mask SBB Z, Z)
-    // X - SETB Z --> X - (mask SBB Z, Z)
-    // TODO: Produce ADC/SBB here directly and avoid SETCC_CARRY?
-    SDValue SBB = materializeSBB(Y.getNode(), Y.getOperand(1), DAG);
-    if (SBB.getValueSizeInBits() != VT.getSizeInBits())
-      SBB = DAG.getZExtOrTrunc(SBB, DL, VT);
-    return DAG.getNode(IsSub ? ISD::SUB : ISD::ADD, DL, VT, X, SBB);
+    // X + SETB Z --> adc X, 0
+    // X - SETB Z --> sbb X, 0
+    return DAG.getNode(IsSub ? X86ISD::SBB : X86ISD::ADC, DL,
+                       DAG.getVTList(VT, MVT::i32), X,
+                       DAG.getConstant(0, DL, VT), Y.getOperand(1));
   }
 
   if (CC == X86::COND_A) {
@@ -40101,10 +40094,9 @@ static SDValue combineAddOrSubToADCOrSBB(SDNode *N, SelectionDAG &DAG) {
                                    EFLAGS.getNode()->getVTList(),
                                    EFLAGS.getOperand(1), EFLAGS.getOperand(0));
       SDValue NewEFLAGS = SDValue(NewSub.getNode(), EFLAGS.getResNo());
-      SDValue SBB = materializeSBB(Y.getNode(), NewEFLAGS, DAG);
-      if (SBB.getValueSizeInBits() != VT.getSizeInBits())
-        SBB = DAG.getZExtOrTrunc(SBB, DL, VT);
-      return DAG.getNode(IsSub ? ISD::SUB : ISD::ADD, DL, VT, X, SBB);
+      return DAG.getNode(IsSub ? X86ISD::SBB : X86ISD::ADC, DL,
+                         DAG.getVTList(VT, MVT::i32), X,
+                         DAG.getConstant(0, DL, VT), NewEFLAGS);
     }
   }
 
