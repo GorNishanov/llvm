@@ -16,7 +16,7 @@ declare i8* @alloc_mem(i64)
 declare void @param_dtor(%struct.Param*)
 declare void @coro_dtor(%struct.coro* %agg.result)
 declare i8* @free_mem(i8*)
-declare i1 @llvm.coro.eh.suspend(token %eh_save)
+declare void @llvm.coro.eh.suspend(token %eh_save)
 declare token @llvm.coro.save(i8* %beg)
 declare i64 @llvm.coro.size.i64()
 declare i8* @llvm.coro.free(token, i8*)
@@ -84,7 +84,7 @@ catch:                                            ; preds = %catch.dispatch
 
 eh_susp_cleanup:                                       ; preds = %catch, %catch.dispatch
   %eh_cpad = cleanuppad within none []
-  %eh_susp = call i1 @llvm.coro.eh.suspend(token %eh_save) [ "funclet"(token %eh_cpad) ]
+  call void @llvm.coro.eh.suspend(token %eh_save) [ "funclet"(token %eh_cpad) ]
   call void @param_dtor(%struct.Param* nonnull %x1) #7 [ "funclet"(token %eh_cpad) ]
   %eh_coro_free = call i8* @llvm.coro.free(token %id, i8* %beg)
   %eh_free_cond = icmp eq i8* %eh_coro_free, null

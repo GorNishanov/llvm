@@ -227,7 +227,6 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
   IRBuilder<> Builder(Context);
   int64_t FinalSuspendIndex = Shape.FinalSuspendIndex;
  
-  auto *True = ConstantInt::getTrue(Context);
   for (IntrinsicInst *CE : Shape.CoroEhSuspends) {
     auto *NewCE = cast<CoroEhSuspendInst>(VMap[CE]);
     auto *CoroSave = NewCE->getCoroSave();
@@ -256,7 +255,6 @@ static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap) {
       CleanupRet->getParent()->getTerminator()->eraseFromParent();
     }
 
-    NewCE->replaceAllUsesWith(True);
     NewCE->eraseFromParent();
 
     CoroSave->eraseFromParent(); // TODO: check for only one
@@ -368,9 +366,7 @@ static void handleEhSuspendInDestroyOrCleanup(coro::Shape &Shape,
                                               SwitchInst *Switch) {
   auto *const BB = EhSuspend->getParent();
   auto *const NewBB = BB->splitBasicBlock(EhSuspend);
-  auto *False = ConstantInt::getTrue(EhSuspend->getContext());
   auto *CoroSave = EhSuspend->getCoroSave();
-  EhSuspend->replaceAllUsesWith(False);
   EhSuspend->eraseFromParent();
   CoroSave->eraseFromParent();
   ConstantInt *IndexVal = Shape.getIndex(Shape.FinalSuspendIndex--);
@@ -513,19 +509,89 @@ static void removeCoroEnds(coro::Shape &Shape) {
   }
 }
 
+static void removeEhSuspendCleanup(CoroEhSuspendInst *CE) {
+  BasicBlock *StartBB = CE->getParent();
+  StartBB->splitBasicBlock(CE)->getNextNode();
+  CoroEndInst *CoroEnd = nullptr;
+
+  SmallPtrSet<BasicBlock *, 4> Visited;
+  SmallVector<BasicBlock *, 4> Worklist;
+
+  Worklist.push_back(StartBB->getSingleSuccessor());
+  while (!Worklist.empty()) {
+    BasicBlock *BB = Worklist.pop_back_val();
+    if (auto *CEI = dyn_cast<CoroEndInst>(&*BB->begin())) {
+      assert(CEI->isUnwind() && "must be unwind");
+      if (CoroEnd) {
+        LLVM_DEBUG({
+          dbgs() << "ERROR: Found multiple unwind coro.ends.\n";
+          CE->dump();
+          CoroEnd->dump();
+          CEI->dump();
+        });
+        report_fatal_error("Cannot handle multpile unwind coro.ends!");
+        return;
+      }
+      CoroEnd = CEI;
+      continue;
+    }
+    if (Visited.insert(BB).second)
+      for (auto *Succ: successors(BB))
+          Worklist.push_back(Succ);
+  }
+
+  if (!CoroEnd) {
+    LLVM_DEBUG({
+      dbgs() << "ERROR: no unwind coro.ends found.\n";
+      CE->dump();
+    });
+    report_fatal_error("No unwind coro.ends!");
+    return;
+  }
+
+  BasicBlock *CoroEndBB = CoroEnd->getParent();
+  auto &C = CoroEnd->getContext();
+
+  if (auto Bundle = CoroEnd->getOperandBundle(LLVMContext::OB_funclet)) {
+    // Do the wineh processing.
+    Value *CoroEndFromPad = Bundle->Inputs[0];
+    Value *CoroEhSuspendFromPad = CE->getOperandBundle(LLVMContext::OB_funclet)->Inputs[0];
+
+    if (CoroEndFromPad != CoroEhSuspendFromPad) {
+      assert(isa<CleanupPadInst>(CoroEndFromPad));
+      auto *NewPadBB = CoroEndBB->splitBasicBlock(CoroEnd, "NewCoroEndBB");
+      
+      new UnreachableInst(C, CoroEndBB->getTerminator());
+      CoroEndBB->getTerminator()->eraseFromParent();
+
+      auto NewPad =
+          CleanupPadInst::Create(ConstantTokenNone::get(C), {}, "", CoroEnd);
+      CoroEndFromPad->replaceAllUsesWith(NewPad);
+
+      CleanupReturnInst::Create(CoroEhSuspendFromPad, NewPadBB,
+                                   StartBB->getTerminator());
+      StartBB->getTerminator()->eraseFromParent();
+      return;
+    }
+    // Otherwise normal control flow should work.
+  }
+  new UnreachableInst(C, CoroEnd);
+
+  CoroEndBB->splitBasicBlock(CoroEnd);
+  CoroEndBB->getTerminator()->eraseFromParent();
+
+  auto *Br = cast<BranchInst>(StartBB->getTerminator());
+  Br->setSuccessor(0, CoroEnd->getParent());
+}
+
 // Remove coro.eh.suspends in the start function. 
 static void removeEhSuspends(coro::Shape &Shape) {
   if (Shape.CoroEhSuspends.empty())
     return;
 
-  LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
-  // Replacing coro.eh.suspend with false, allows the unwind proceed over to
-  // the rest of the cleanup (on Itanium EH model). 
-  auto *False = ConstantInt::getFalse(Context);
-
   for (CoroEhSuspendInst *CE : Shape.CoroEhSuspends) {
     auto *CoroSave = CE->getCoroSave();
-    CE->replaceAllUsesWith(False);
+    removeEhSuspendCleanup(CE);
     CE->eraseFromParent();
     CoroSave->eraseFromParent();
   }
@@ -923,10 +989,10 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   coro::replaceCoroFree(DestroyClone.CoroId);
   coro::replaceCoroFree(CleanupClone.CoroId, /*Elide=*/true);
 
+  removeEhSuspends(Shape);
   // We no longer need coro.end in F.
   removeCoroEnds(Shape);
-  removeEhSuspends(Shape);
-
+  
   postSplitCleanup(F);
   postSplitCleanup(ResumeClone.Func);
   postSplitCleanup(DestroyClone.Func);
