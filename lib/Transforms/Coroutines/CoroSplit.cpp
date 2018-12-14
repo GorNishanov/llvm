@@ -165,6 +165,22 @@ static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape) {
   Builder.SetInsertPoint(UnreachBB);
   Builder.CreateUnreachable();
 
+  // All coro.eh.suspend instruction should result in suspension at the final
+  // suspend point.
+  for (CoroEhSuspendInst *ES: Shape.CoroEhSuspends) {
+    auto *Save = ES->getCoroSave();
+    Builder.SetInsertPoint(Save);
+
+    auto *GepIndex = Builder.CreateConstInBoundsGEP2_32(FrameTy, FramePtr, 0,
+                                                        0, "ResumeFn.addr");
+    auto *NullPtr = ConstantPointerNull::get(cast<PointerType>(
+        cast<PointerType>(GepIndex->getType())->getElementType()));
+    Builder.CreateStore(NullPtr, GepIndex);
+
+    Save->replaceAllUsesWith(ConstantTokenNone::get(C));
+    Save->eraseFromParent();
+  }
+
   return NewEntry;
 }
 
@@ -179,6 +195,30 @@ static void replaceFallthroughCoroEnd(IntrinsicInst *End,
   auto *BB = NewE->getParent();
   BB->splitBasicBlock(NewE);
   BB->getTerminator()->eraseFromParent();
+}
+
+// In Resumers, we replace coro.eh.suspend with True to force the immediate
+// unwind to caller.
+static void replaceCoroEhSuspend(coro::Shape &Shape, ValueToValueMapTy &VMap) {
+  if (Shape.CoroEhSuspends.empty())
+    return;
+
+  LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
+  auto *True = ConstantInt::getTrue(Context);
+  for (CoroEhSuspendInst *CE : Shape.CoroEhSuspends) {
+    auto *NewCE = cast<IntrinsicInst>(VMap[CE]);
+
+    // If coro.suspend.eh has an associated bundle, add cleanupret instruction.
+    if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
+      Value *FromPad = Bundle->Inputs[0];
+      auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
+      NewCE->getParent()->splitBasicBlock(NewCE);
+      CleanupRet->getParent()->getTerminator()->eraseFromParent();
+    }
+
+    NewCE->replaceAllUsesWith(True);
+    NewCE->eraseFromParent();
+  }
 }
 
 // In Resumers, we replace unwind coro.end with True to force the immediate
@@ -326,6 +366,8 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   // Remove coro.end intrinsics.
   replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
   replaceUnwindCoroEnds(Shape, VMap);
+  replaceCoroEhSuspend(Shape, VMap);
+
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
   // to suppress deallocation code.
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
@@ -334,6 +376,19 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   NewF->setCallingConv(CallingConv::Fast);
 
   return NewF;
+}
+
+static void removeCoroEhSuspends(coro::Shape &Shape) {
+  if (Shape.CoroEhSuspends.empty())
+    return;
+
+  LLVMContext &Context = Shape.CoroEhSuspends.front()->getContext();
+  auto *False = ConstantInt::getFalse(Context);
+
+  for (CoroEhSuspendInst *CE : Shape.CoroEhSuspends) {
+    CE->replaceAllUsesWith(False);
+    CE->eraseFromParent();
+  }
 }
 
 static void removeCoroEnds(coro::Shape &Shape) {
@@ -803,6 +858,7 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
 
   // We no longer need coro.end in F.
   removeCoroEnds(Shape);
+  removeCoroEhSuspends(Shape);
 
   postSplitCleanup(F);
   postSplitCleanup(*ResumeClone);
