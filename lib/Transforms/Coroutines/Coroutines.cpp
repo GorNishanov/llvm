@@ -282,8 +282,8 @@ void coro::Shape::buildFrom(Function &F) {
         }
         break;
       }
-      case Intrinsic::coro_eh_suspend:
-        CoroEhSuspends.push_back(cast<CoroEhSuspendInst>(II));
+      case Intrinsic::coro_eh_save:
+        CoroEhSaves.push_back(cast<CoroEhSaveInst>(II));
         break;
       case Intrinsic::coro_end:
         CoroEnds.push_back(cast<CoroEndInst>(II));
@@ -349,9 +349,9 @@ void coro::Shape::buildFrom(Function &F) {
     CoroSave->eraseFromParent();
 
   // Sanity check for final suspend.
-  if (!CoroEhSuspends.empty() && !HasFinalSuspend)
+  if (!CoroEhSaves.empty() && !HasFinalSuspend)
     report_fatal_error(
-        "Coroutine with no final suspend point has coro.eh.suspend intrinsic");
+        "Coroutine with no final suspend point has coro.eh.save intrinsic");
 }
 
 void LLVMAddCoroEarlyPass(LLVMPassManagerRef PM) {

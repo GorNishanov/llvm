@@ -262,18 +262,13 @@ public:
   }
 };
 
-/// This represents the llvm.coro.suspend.eh instruction.
-class LLVM_LIBRARY_VISIBILITY CoroEhSuspendInst : public IntrinsicInst {
-  enum { SaveArg };
-
+/// This represents the llvm.coro.eh.save instruction.
+class LLVM_LIBRARY_VISIBILITY CoroEhSaveInst : public IntrinsicInst {
 public:
-  CoroSaveInst *getCoroSave() const {
-    return cast<CoroSaveInst>(getArgOperand(SaveArg));
-  }
 
   // Methods to support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const IntrinsicInst *I) {
-    return I->getIntrinsicID() == Intrinsic::coro_eh_suspend;
+    return I->getIntrinsicID() == Intrinsic::coro_eh_save;
   }
   static bool classof(const Value *V) {
     return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
