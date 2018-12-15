@@ -868,7 +868,6 @@ void coro::buildCoroutineFrame(Function &F, Shape &Shape) {
   // access to local variables.
   LowerDbgDeclare(F);
 
-  Shape.PromiseAlloca = Shape.CoroBegin->getId()->getPromise();
   if (Shape.PromiseAlloca) {
     Shape.CoroBegin->getId()->clearPromise();
   }
@@ -895,50 +894,53 @@ void coro::buildCoroutineFrame(Function &F, Shape &Shape) {
   IRBuilder<> Builder(F.getContext());
   SpillInfo Spills;
 
-  for (int Repeat = 0; Repeat < 4; ++Repeat) {
-    // See if there are materializable instructions across suspend points.
-    for (Instruction &I : instructions(F))
-      if (materializable(I))
-        for (User *U : I.users())
-          if (Checker.isDefinitionAcrossSuspend(I, U))
-            Spills.emplace_back(&I, U);
+  if (!Shape.CoroSuspends.empty()) {
 
-    if (Spills.empty())
-      break;
+    for (int Repeat = 0; Repeat < 4; ++Repeat) {
+      // See if there are materializable instructions across suspend points.
+      for (Instruction &I : instructions(F))
+        if (materializable(I))
+          for (User *U : I.users())
+            if (Checker.isDefinitionAcrossSuspend(I, U))
+              Spills.emplace_back(&I, U);
 
-    // Rewrite materializable instructions to be materialized at the use point.
-    LLVM_DEBUG(dump("Materializations", Spills));
-    rewriteMaterializableInstructions(Builder, Spills);
-    Spills.clear();
+      if (Spills.empty())
+        break;
+
+      // Rewrite materializable instructions to be materialized at the use point.
+      LLVM_DEBUG(dump("Materializations", Spills));
+      rewriteMaterializableInstructions(Builder, Spills);
+      Spills.clear();
+    }
+
+    // Collect the spills for arguments and other not-materializable values.
+    for (Argument &A : F.args())
+      for (User *U : A.users())
+        if (Checker.isDefinitionAcrossSuspend(A, U))
+          Spills.emplace_back(&A, U);
+
+    for (Instruction &I : instructions(F)) {
+      // Values returned from coroutine structure intrinsics should not be part
+      // of the Coroutine Frame.
+      if (isCoroutineStructureIntrinsic(I) || &I == Shape.CoroBegin)
+        continue;
+      // The Coroutine Promise always included into coroutine frame, no need to
+      // check for suspend crossing.
+      if (Shape.PromiseAlloca == &I)
+        continue;
+
+      for (User *U : I.users())
+        if (Checker.isDefinitionAcrossSuspend(I, U)) {
+          // We cannot spill a token.
+          if (I.getType()->isTokenTy())
+            report_fatal_error(
+                "token definition is separated from the use by a suspend point");
+          Spills.emplace_back(&I, U);
+        }
+    }
+    LLVM_DEBUG(dump("Spills", Spills));
+    moveSpillUsesAfterCoroBegin(F, Spills, Shape.CoroBegin);
   }
-
-  // Collect the spills for arguments and other not-materializable values.
-  for (Argument &A : F.args())
-    for (User *U : A.users())
-      if (Checker.isDefinitionAcrossSuspend(A, U))
-        Spills.emplace_back(&A, U);
-
-  for (Instruction &I : instructions(F)) {
-    // Values returned from coroutine structure intrinsics should not be part
-    // of the Coroutine Frame.
-    if (isCoroutineStructureIntrinsic(I) || &I == Shape.CoroBegin)
-      continue;
-    // The Coroutine Promise always included into coroutine frame, no need to
-    // check for suspend crossing.
-    if (Shape.PromiseAlloca == &I)
-      continue;
-
-    for (User *U : I.users())
-      if (Checker.isDefinitionAcrossSuspend(I, U)) {
-        // We cannot spill a token.
-        if (I.getType()->isTokenTy())
-          report_fatal_error(
-              "token definition is separated from the use by a suspend point");
-        Spills.emplace_back(&I, U);
-      }
-  }
-  LLVM_DEBUG(dump("Spills", Spills));
-  moveSpillUsesAfterCoroBegin(F, Spills, Shape.CoroBegin);
   Shape.FrameTy = buildFrameType(F, Shape, Spills);
   Shape.FramePtr = insertSpills(Spills, Shape);
 }

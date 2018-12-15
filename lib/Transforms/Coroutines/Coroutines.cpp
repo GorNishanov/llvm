@@ -328,6 +328,8 @@ void coro::Shape::buildFrom(Function &F) {
     return;
   }
 
+  PromiseAlloca = CoroBegin->getId()->getPromise();
+
   // The coro.free intrinsic is always lowered to the result of coro.begin.
   for (CoroFrameInst *CF : CoroFrames) {
     CF->replaceAllUsesWith(CoroBegin);

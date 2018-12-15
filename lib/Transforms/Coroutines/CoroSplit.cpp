@@ -625,10 +625,23 @@ static bool hasCallsBetween(Instruction *Save, Instruction *ResumeOrDestroy) {
   return false;
 }
 
+static bool refersToCoroBegin(Value *Frame, coro::Shape &Shape) {
+  if (Frame == Shape.CoroBegin)
+    return true;
+
+  if (auto *Gep = dyn_cast<GetElementPtrInst>(Frame))
+    if (Gep->getNumIndices() == 1 && Gep->hasAllConstantIndices())
+      if (auto *Idx = dyn_cast<ConstantInt>(Gep->idx_begin()))
+        if (Idx->getSExtValue() == -2)
+          return true;
+
+  return false;
+}
+
 // If a SuspendIntrin is preceded by Resume or Destroy, we can eliminate the
 // suspend point and replace it with nornal control flow.
-static bool simplifySuspendPoint(CoroSuspendInst *Suspend,
-                                 CoroBeginInst *CoroBegin) {
+static bool simplifySuspendPoint(CoroSuspendInst *Suspend, coro::Shape &Shape) {
+Restart:;
   Instruction *Prev = Suspend->getPrevNode();
   if (!Prev) {
     auto *Pred = Suspend->getParent()->getSinglePredecessor();
@@ -650,8 +663,25 @@ static bool simplifySuspendPoint(CoroSuspendInst *Suspend,
   if (!SubFn)
     return false;
 
+  // Check for noop coro:
+  auto *Frame = SubFn->getFrame()->stripPointerCasts();
+  if (Frame->getName().contains("NoopCoro.Frame.Const") && isa<CallInst>(CallInstr)) {
+    auto *CalledValue = CS.getCalledValue();
+    CallInstr->eraseFromParent();
+    // If no more users remove it. Usually it is a bitcast of SubFn.
+    if (CalledValue != SubFn && CalledValue->user_empty())
+      if (auto *I = dyn_cast<Instruction>(CalledValue))
+        I->eraseFromParent();
+
+    // Now we are good to remove SubFn.
+    if (SubFn->user_empty())
+      SubFn->eraseFromParent();
+
+    goto Restart;
+  }
+
   // Does not refer to the current coroutine, we cannot do anything with it.
-  if (SubFn->getFrame() != CoroBegin)
+  if (!refersToCoroBegin(Frame, Shape))
     return false;
 
   // See if the transformation is safe. Specifically, see if there are any
@@ -695,7 +725,7 @@ static void simplifySuspendPoints(coro::Shape &Shape) {
   if (N == 0)
     return;
   while (true) {
-    if (simplifySuspendPoint(S[I], Shape.CoroBegin)) {
+    if (simplifySuspendPoint(S[I], Shape)) {
       if (--N == I)
         break;
       std::swap(S[I], S[N]);
