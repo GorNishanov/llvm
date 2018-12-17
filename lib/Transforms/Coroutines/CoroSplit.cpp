@@ -723,7 +723,8 @@ static bool optimizeOutEhSaves(coro::Shape &Shape) {
 
 // If a SuspendIntrin is preceded by Resume or Destroy, we can eliminate the
 // suspend point and replace it with nornal control flow.
-static bool simplifySuspendPoint(CoroSuspendInst *Suspend, coro::Shape &Shape) {
+static bool simplifySuspendPoint(CoroSuspendInst *Suspend, coro::Shape &Shape,
+                                 bool LastSuspend = false) {
 Restart:;
   Instruction *Prev = Suspend->getPrevNode();
   if (!Prev) {
@@ -776,8 +777,9 @@ Restart:;
 
   // We can only eliminate final suspend if there is no coro.eh.saves, as they
   // rely on final suspend being present.
-  if (Suspend->isFinal() && !optimizeOutEhSaves(Shape))
-    return false;
+  if (Suspend->isFinal() && !Shape.CoroEhSaves.empty())
+    if (!LastSuspend || !optimizeOutEhSaves(Shape))
+      return false;
 
   // Replace llvm.coro.suspend with the value that results in resumption over
   // the resume or cleanup path.
@@ -812,6 +814,10 @@ static void simplifySuspendPoints(coro::Shape &Shape) {
   size_t I = 0, N = S.size();
   if (N == 0)
     return;
+  // Final suspend point is the last element in CoroSuspends. We want to process
+  // it last.
+  if (Shape.HasFinalSuspend)
+    --N;
   while (true) {
     if (simplifySuspendPoint(S[I], Shape)) {
       if (--N == I)
@@ -821,6 +827,11 @@ static void simplifySuspendPoints(coro::Shape &Shape) {
     }
     if (++I == N)
       break;
+  }
+  if (Shape.HasFinalSuspend) {
+    std::swap(S[N], S.back());
+    if (!simplifySuspendPoint(S[N], Shape, /*LastSuspend=*/ N == 0))
+      ++N;
   }
   S.resize(N);
 }
