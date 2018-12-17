@@ -168,7 +168,7 @@ static BasicBlock *createResumeEntryBlock(Function &F, coro::Shape &Shape) {
   if (!Shape.CoroEhSaves.empty()) {
     auto *False = ConstantInt::getFalse(C);
 
-    // All coro.eh.suspend instruction should result in suspension at the final
+    // All coro.eh.save instruction should result in suspension at the final
     // suspend point.
     for (CoroEhSaveInst *ES: Shape.CoroEhSaves) {
       Builder.SetInsertPoint(ES);
@@ -638,6 +638,89 @@ static bool refersToCoroBegin(Value *Frame, coro::Shape &Shape) {
   return false;
 }
 
+static bool isRethrow(Instruction *Instr) {
+  auto *Inv = dyn_cast<InvokeInst>(Instr);
+  if (!Inv)
+    return false;
+
+  auto *CV = Inv->getCalledValue();
+  auto Name = CV->getName();
+  if (Name.contains("__cxa_rethrow"))
+    return true;
+
+  if (!Name.contains("_CxxThrowException"))
+    return false;
+
+  if (Inv->getNumArgOperands() != 2)
+    return false;
+
+  // Both arguments should be null for rethrow.
+  return isa<ConstantPointerNull>(Inv->getArgOperand(0))
+    && isa<ConstantPointerNull>(Inv->getArgOperand(1));
+}
+
+static bool optimizeOutEhSaves(coro::Shape &Shape) {
+  SmallVector<CallSite, 4> Remove;
+
+  // coro.eh.save can be optimized out if it follows this pattern:
+  //
+  //    %23 = call i1 @llvm.coro.eh.save(i8* %5)
+  //    br i1 %23, label %cond.end, label %cond.false
+  //  cond.false:
+  //    %32 = call i8* @llvm.coro.subfn.addr(i8* nonnull %.cast.i.i, i8 1)
+  //    %33 = bitcast i8* %32 to void (i8*)*
+  //    invoke fastcc void %33(i8* nonnull %.cast.i.i)
+  //        to label %.noexc unwind label %lpad45
+  //  .noexc:
+  //    invoke void @__cxa_rethrow() #18 ; @_CxxThrowException
+  //        to label %.noexc109 unwind label %lpad45
+
+  for (CoroEhSaveInst *ES : Shape.CoroEhSaves)
+    if (ES->hasOneUse())
+      if (auto *Br = dyn_cast<BranchInst>(ES->user_back())) {
+        BasicBlock *BB = Br->getSuccessor(1);
+        if (auto *II = dyn_cast<CoroSubFnInst>(BB->getFirstNonPHI()))
+          if (auto *BC = dyn_cast<BitCastInst>(II->getNextNode()))
+            if (CallSite CS{BC->getNextNode()}) {
+              BasicBlock *NextBB = nullptr;
+              if (auto *Inv = dyn_cast<InvokeInst>(CS.getInstruction()))
+                NextBB = Inv->getNormalDest();
+              else
+                NextBB = BB->getSingleSuccessor();
+
+              if (!NextBB)
+                return false;
+
+              if (isRethrow(NextBB->getFirstNonPHI()))
+                Remove.push_back(CS);
+            }
+      }
+
+  if (Remove.size() != Shape.CoroEhSaves.size())
+    return false;
+
+  // No longer needs EhSaves
+  auto &C = Shape.CoroBegin->getContext();
+  auto *False = ConstantInt::getFalse(C);
+  for (CoroEhSaveInst *ES : Shape.CoroEhSaves) {
+    ES->replaceAllUsesWith(False);
+    ES->eraseFromParent();
+  }
+  Shape.CoroEhSaves.clear();
+
+  // Remove calls to destroy as well.
+  for (CallSite CS : Remove) {
+    auto *Inst = CS.getInstruction();
+    if (auto Inv = dyn_cast<InvokeInst>(Inst)) {
+      auto *NextBB = Inv->getNormalDest();
+      BranchInst::Create(NextBB, Inv);
+    }
+    Inst->eraseFromParent();
+  }
+
+  return true;
+}
+
 // If a SuspendIntrin is preceded by Resume or Destroy, we can eliminate the
 // suspend point and replace it with nornal control flow.
 static bool simplifySuspendPoint(CoroSuspendInst *Suspend, coro::Shape &Shape) {
@@ -689,6 +772,11 @@ Restart:;
   // coroutine rendering this optimization unsafe.
   auto *Save = Suspend->getCoroSave();
   if (hasCallsBetween(Save, CallInstr))
+    return false;
+
+  // We can only eliminate final suspend if there is no coro.eh.saves, as they
+  // rely on final suspend being present.
+  if (Suspend->isFinal() && !optimizeOutEhSaves(Shape))
     return false;
 
   // Replace llvm.coro.suspend with the value that results in resumption over
