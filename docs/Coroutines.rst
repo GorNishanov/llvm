@@ -1066,6 +1066,82 @@ The following table summarizes the handling of `coro.end`_ intrinsic.
 |            | Landingpad  | nothing           | nothing                       |
 +------------+-------------+-------------------+-------------------------------+
 
+.. _coro.eh.suspend:
+
+'llvm.coro.eh.suspend' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+::
+
+  declare i1 @llvm.coro.eh.suspend(token <save>)
+
+Overview:
+"""""""""
+
+The '``llvm.coro.eh.suspend``' marks the point where unwinding of 
+the resume part of the coroutine must continue to unwind to the caller. 
+The coroutine is considered at the final suspend point and
+the remaining cleanup code after `coro.eh.suspend` will be executed
+when `coro.destroy` is called.
+
+Arguments:
+""""""""""
+
+The first argument refers to a token of `coro.save` intrinsic that marks the 
+point when coroutine state is prepared for suspension. 
+
+Semantics:
+""""""""""
+This intrinsic is lowered when a coroutine is split into
+the start, resume and destroy parts. In the start part, it is a no-op,
+in resume part, it is replaced with "unwind to caller" instruction appropriate
+for the EH personality of the function. 
+
+In the destroy part, the rest of the code after `coro.eh.suspend` will
+become part of the cleanup executed when `coro.destroy` is called when coroutine
+is suspended at the suspend point marked by this `coro.eh.suspend`.
+
+For landingpad based exception model, it is expected that frontend uses the 
+`coro.eh.suspend`_ intrinsic as follows:
+
+.. code-block:: llvm
+
+    ehcleanup:
+      %save = call void @llvm.coro.save(i8* %coro.begin)
+      ; possibly some calls in between
+      %InResumePart = call i1 @llvm.coro.eh.suspend(token %save)
+      br i1 %InResumePart, label %eh.resume, label %cleanup.cont
+
+    cleanup.cont:
+      ; rest of the cleanup
+
+    eh.resume:
+      %exn = load i8*, i8** %exn.slot, align 8
+      %sel = load i32, i32* %ehselector.slot, align 4
+      %lpad.val = insertvalue { i8*, i32 } undef, i8* %exn, 0
+      %lpad.val29 = insertvalue { i8*, i32 } %lpad.val, i32 %sel, 1
+      resume { i8*, i32 } %lpad.val29
+
+The `CoroSpit` pass replaces `coro.eh.suspend` with ``True`` in the resume
+functions, thus leading to immediate unwind to the caller, whereas in start 
+function it is replaced with ``False``, thus allowing to proceed to the rest of 
+the cleanup code.
+
+For Windows Exception handling model, a frontend should attach a funclet bundle
+referring to an enclosing cleanuppad as follows:
+
+.. code-block:: llvm
+
+    ehcleanup: 
+      %tok = cleanuppad within none []
+      %save = call void @llvm.coro.save(i8* %coro.begin)
+      ; possibly some calls in between
+      %unused = call i1 @llvm.coro.eh.suspend(i8* null) [ "funclet"(token %tok) ]
+      cleanupret from %tok unwind label %RestOfTheCleanup
+
+In the resume part, the `CoroSplit` pass, if the funclet bundle is present, will
+insert  ``cleanupret from %tok unwind to caller`` before
+the `coro.eh.suspend`_ intrinsic and will remove the rest of the block.
+
 .. _coro.suspend:
 .. _suspend points:
 
