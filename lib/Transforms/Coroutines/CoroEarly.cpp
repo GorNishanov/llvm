@@ -168,6 +168,9 @@ bool Lowerer::lowerEarlyIntrinsics(Function &F) {
         if (cast<CoroSuspendInst>(&I)->isFinal())
           CS.setCannotDuplicate();
         break;
+      case Intrinsic::coro_init_resume:
+        CS.setCannotDuplicate();
+        break;
       case Intrinsic::coro_end:
         // Make sure that fallthrough coro.end is not duplicated as CoroSplit
         // pass expects that there is at most one fallthrough coro.end.

@@ -228,6 +228,19 @@ public:
   }
 };
 
+/// This represents the llvm.coro.init.resume instruction.
+class LLVM_LIBRARY_VISIBILITY CoroInitResumeInst : public InvokeInst {
+public:
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const InvokeInst *I) {
+    return I->getCalledFunction()->getIntrinsicID() ==
+           Intrinsic::coro_init_resume;
+  }
+  static bool classof(const Value *V) {
+    return isa<InvokeInst>(V) && classof(cast<InvokeInst>(V));
+  }
+};
+
 /// This represents the llvm.coro.save instruction.
 class LLVM_LIBRARY_VISIBILITY CoroSaveInst : public IntrinsicInst {
 public:

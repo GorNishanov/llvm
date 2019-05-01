@@ -3082,7 +3082,7 @@ void Verifier::visitInvokeInst(InvokeInst &II) {
 /// visitUnaryOperator - Check the argument to the unary operator.
 ///
 void Verifier::visitUnaryOperator(UnaryOperator &U) {
-  Assert(U.getType() == U.getOperand(0)->getType(), 
+  Assert(U.getType() == U.getOperand(0)->getType(),
          "Unary operators must have same type for"
          "operands and result!",
          &U);
@@ -4029,6 +4029,7 @@ void Verifier::visitInstruction(Instruction &I) {
       Assert(
           !F->isIntrinsic() || isa<CallInst>(I) ||
               F->getIntrinsicID() == Intrinsic::donothing ||
+              F->getIntrinsicID() == Intrinsic::coro_init_resume ||
               F->getIntrinsicID() == Intrinsic::coro_resume ||
               F->getIntrinsicID() == Intrinsic::coro_destroy ||
               F->getIntrinsicID() == Intrinsic::experimental_patchpoint_void ||
@@ -4946,7 +4947,7 @@ struct VerifierLegacyPass : public FunctionPass {
 
   bool runOnFunction(Function &F) override {
     if (!V->verify(F) && FatalErrors) {
-      errs() << "in function " << F.getName() << '\n'; 
+      errs() << "in function " << F.getName() << '\n';
       report_fatal_error("Broken function found, compilation aborted!");
     }
     return false;

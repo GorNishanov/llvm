@@ -872,6 +872,9 @@ void coro::buildCoroutineFrame(Function &F, Shape &Shape) {
     Shape.CoroBegin->getId()->clearPromise();
   }
 
+  for (CoroInitResumeInst *CIR : Shape.CoroInitResumes)
+    splitBlockIfNotFirst(CIR, "CoroInitRes");
+
   // Make sure that all coro.save, coro.suspend and the fallthrough coro.end
   // intrinsics are in their own blocks to simplify the logic of building up
   // SuspendCrossing data.

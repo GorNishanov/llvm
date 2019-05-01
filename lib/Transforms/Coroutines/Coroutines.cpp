@@ -295,6 +295,8 @@ void coro::Shape::buildFrom(Function &F) {
         }
         break;
       }
+    } else if (auto *CIR = dyn_cast<CoroInitResumeInst>(&I)) {
+      CoroInitResumes.push_back(CIR);
     }
   }
 
