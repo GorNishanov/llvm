@@ -233,8 +233,9 @@ class LLVM_LIBRARY_VISIBILITY CoroInitResumeInst : public InvokeInst {
 public:
   // Methods to support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const InvokeInst *I) {
-    return I->getCalledFunction()->getIntrinsicID() ==
-           Intrinsic::coro_init_resume;
+    if (auto *CalledFunc = I->getCalledFunction())
+      return CalledFunc->getIntrinsicID() == Intrinsic::coro_init_resume;
+    return false;
   }
   static bool classof(const Value *V) {
     return isa<InvokeInst>(V) && classof(cast<InvokeInst>(V));
