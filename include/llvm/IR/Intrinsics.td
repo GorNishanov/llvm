@@ -962,6 +962,7 @@ def int_coro_param : Intrinsic<[llvm_i1_ty], [llvm_ptr_ty, llvm_ptr_ty],
                                [IntrNoMem, ReadNone<0>, ReadNone<1>]>;
 
 def int_coro_init_resume : Intrinsic<[llvm_i1_ty], [llvm_ptr_ty], [Throws]>;
+def int_coro_eh_suspend : Intrinsic<[llvm_i1_ty], [llvm_token_ty], []>;
 
 // Coroutine Manipulation Intrinsics.
 

@@ -177,7 +177,7 @@ SuspendCrossingInfo::SuspendCrossingInfo(Function &F, coro::Shape &Shape)
   // consume. Note, that crossing coro.save also requires a spill, as any code
   // between coro.save and coro.suspend may resume the coroutine and all of the
   // state needs to be saved by that time.
-  auto markSuspendBlock = [&](IntrinsicInst *BarrierInst) {
+  auto markSuspendBlock = [&](Instruction *BarrierInst) {
     BasicBlock *SuspendBlock = BarrierInst->getParent();
     auto &B = getBlockData(SuspendBlock);
     B.Suspend = true;
@@ -186,6 +186,9 @@ SuspendCrossingInfo::SuspendCrossingInfo(Function &F, coro::Shape &Shape)
   for (CoroSuspendInst *CSI : Shape.CoroSuspends) {
     markSuspendBlock(CSI);
     markSuspendBlock(CSI->getCoroSave());
+  }
+  for (CoroInitResumeInst *CRI : Shape.CoroInitResumes) {
+    markSuspendBlock(CRI);
   }
 
   // Iterate propagating consumes and kills until they stop changing.
