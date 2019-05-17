@@ -49,6 +49,210 @@ public:
   }
 };
 
+/// This represents the llvm.eh.typeid.for instruction.
+class LLVM_LIBRARY_VISIBILITY EhTypeidForInst : public IntrinsicInst {
+  enum { TypeInfo };
+
+public:
+  Constant *getTypeInfo() const {
+    if (auto *TI = dyn_cast<Constant>(getArgOperand(TypeInfo)))
+      return TI->stripPointerCasts();
+    return nullptr;
+  }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::eh_typeid_for;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+struct BlockColor {
+  std::bitset<2> Colors{1};
+  unsigned Nesting = 0;
+
+  std::string getName() {
+    std::string result;
+    if (Colors[0]) result.push_back('0');
+    if (Colors[1]) result.push_back('1');
+    return result;
+  }
+};
+
+enum {TYPEID_INDEX = 1};
+
+static bool handleShortCircuitBranch(BranchInst *Br, LandingPadInst *LP,
+                              Constant *TypeInfo) {
+  if (Br->isUnconditional())
+    return false;
+
+  BasicBlock *TrueSucc = Br->getSuccessor(0);
+  BasicBlock *FalseSucc = Br->getSuccessor(1);
+  // Avoid multiple edges early.
+  if (TrueSucc == FalseSucc)
+    return false;
+
+  auto *Cmp = dyn_cast<ICmpInst>(Br->getCondition());
+  if (!Cmp || !Cmp->isEquality())
+    return false;
+
+  if (Cmp->getPredicate() == ICmpInst::ICMP_NE)
+    std::swap(TrueSucc, FalseSucc);
+
+  Value *LHS = Cmp->getOperand(0);
+  Value *RHS = Cmp->getOperand(1);
+
+  auto *TypeIdInst = dyn_cast<EhTypeidForInst>(RHS);
+  if (!TypeIdInst) {
+    std::swap(LHS, RHS);
+    TypeIdInst = dyn_cast<EhTypeidForInst>(RHS);
+    if (!TypeIdInst)
+      return false;
+  }
+
+  if (TypeIdInst->getTypeInfo() != TypeInfo)
+    return false;
+
+  // Verify that LHS is an extract instruction asking for the passed in LPad.
+  if (auto EI = dyn_cast<ExtractValueInst>(LHS))
+    if (EI->getAggregateOperand() == LP)
+      if (EI->getNumIndices() == 1)
+        if (*EI->idx_begin() == TYPEID_INDEX) {
+          dbgs() << "GOOD BRANCH: " << TrueSucc->getName() << "\n";
+          return true;
+        }
+
+  return false;
+}
+
+bool examineBlocks(LandingPadInst* LP, Constant* TypeInfo) {
+  DenseMap<BasicBlock *, BlockColor> Colors;
+  SmallVector<std::pair<BasicBlock*, BlockColor>, 16> Worklist;
+  SmallVector<CallInst *, 4> CatchEnds;
+  SmallVector<InvokeInst *, 4> CatchEndInvokes;
+  bool UnknownFunctionInCleanup = false;
+
+  BasicBlock *InitialBlock = LP->getParent();
+  BlockColor InitialColor;
+  if (!InitialBlock->getSinglePredecessor()) {
+    InitialColor.Colors.set(1);
+  }
+
+  Worklist.push_back({InitialBlock, InitialColor});
+
+  while (!Worklist.empty()) {
+    BasicBlock *Visiting;
+    BlockColor Color;
+    std::tie(Visiting, Color) = Worklist.pop_back_val();
+
+    // TODO: add DEBUG_WITH_TYPE
+    dbgs() << "Visiting " << Visiting->getName() << " " << Color.getName()
+           << " nest: " << Color.Nesting << "\n";
+
+    Instruction *Current = Visiting->getFirstNonPHIOrDbgOrLifetime();
+    while (!Current->isTerminator()) {
+      if (isa<IntrinsicInst>(Current))
+        ; // assume intrinsics are safe
+      else if (auto *CI = dyn_cast<CallInst>(Current)) {
+        if (CheckFnName(CI, "__cxa_end_catch")) {
+          if (Color.Nesting == 0) {
+            CatchEnds.push_back(CI);
+            Current = Visiting->getTerminator();
+            break; // need to go to next block
+          }
+          else
+            --Color.Nesting;
+        }
+        else if (CheckFnName(CI, "__clang_call_terminate"))
+          ; // Do Nothing (Yet), but we may take advantage of this later.
+
+        // If we encounter an unknown function in the catch, don't shortcircuit
+        // for now.
+        else if (Color.Nesting == 0)
+          return false;
+        else
+          UnknownFunctionInCleanup = true;
+      }
+      Current = Current->getNextNode();
+    }
+    if (auto *Inv = dyn_cast<InvokeInst>(Current)) {
+        if (CheckFnName(Inv, "__cxa_end_catch")) {
+          if (Color.Nesting == 0)
+            CatchEndInvokes.push_back(Inv);
+          else
+            --Color.Nesting;
+        }
+        // If we encounter an unknown function in the catch, don't shortcircuit
+        // for now.
+        else if (Color.Nesting == 0)
+          return false;
+        else
+          UnknownFunctionInCleanup = true;
+    }
+    else if (Color.Nesting == 0) {
+      if (auto *Br = dyn_cast<BranchInst>(Current))
+        if (handleShortCircuitBranch(Br, LP, TypeInfo))
+          ;
+    }
+
+  }
+
+  return true;
+}
+
+namespace {
+
+struct ShortCircuitThrowWorker {
+  LandingPadInst *LandingPad;
+  TinyPtrVector<CxaThrowInst*> Throws;
+  Constant *TypeInfo;
+
+  ShortCircuitThrowWorker() {}
+  ShortCircuitThrowWorker(ShortCircuitThrowWorker const&) = delete;
+
+  bool isShortCircuitCandidate(BasicBlock &BB) {
+    // It is a throw instruction.
+    auto *Throw = dyn_cast<CxaThrowInst>(BB.getTerminator());
+    if (!Throw)
+      return nullptr;
+
+    // It unwinds into a landing pad.
+    auto *Lpad = Throw->getUnwindDest()->getLandingPadInst();
+    if (!Lpad)
+      return nullptr;
+
+    // The type being thrown is the first type in the catch clause.
+    if (Lpad->getNumClauses() == 0 || !Lpad->isCatch(0))
+      return nullptr;
+
+    Constant *CatchClause = Lpad->getClause(0);
+    Constant *CatchTypeInfo = CatchClause->stripPointerCasts();
+
+    auto *ThrowTypeInfo = Throw->getTypeInfo();
+    if (ThrowTypeInfo != CatchTypeInfo)
+      return nullptr;
+
+    this->TypeInfo = ThrowTypeInfo;
+    this->LandingPad = Lpad;
+    return true;
+  }
+
+  bool trySimplify(BasicBlock &BB) {
+    if (isShortCircuitCandidate(BB)) {
+      if (examineBlocks(LandingPad, TypeInfo))
+        return true;
+    }
+
+    return false;
+  }
+
+
+};
+}
+
+bool trySimplify(CxaThrowInst *) { return nullptr; }
 /// This represents the __cxa_throw instruction.
 class LLVM_LIBRARY_VISIBILITY CxaBeginCatch : public CallInst {
 public:
@@ -288,20 +492,19 @@ struct ThrowSimplifier {
 } // namespace
 
 static bool simplifyGNU_CXX(Function &F) {
-  SmallVector<ThrowSimplifier, 4> Throws;
-  for (auto &BB : F)
-    if (ThrowSimplifier RS{BB})
-      Throws.push_back(RS);
-
-  if (Throws.empty())
-    return false;
-
+  bool anyChanges = false;
   bool changed = false;
-
-  for (auto &RS : Throws)
-    changed |= RS.simplify();
-
-  return changed;
+  ShortCircuitThrowWorker ShortCircuitWorker;
+  do {
+    for (auto &BB : F) {
+      if (ShortCircuitWorker.trySimplify(BB)) {
+        changed = true;
+        anyChanges |= true;
+        break;
+      }
+    }
+  } while (changed);
+  return anyChanges;
 }
 
 //===----------------------------------------------------------------------===//
