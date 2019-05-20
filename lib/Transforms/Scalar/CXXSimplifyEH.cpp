@@ -19,7 +19,6 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
-
 using namespace llvm;
 
 #define DEBUG_TYPE "cxx-eh-simplify"
@@ -31,11 +30,50 @@ static bool CheckFnName(const CallBase *I, StringRef Name) {
   return false;
 }
 
+/// This represents the cxa_allocate_exception instruction.
+class LLVM_LIBRARY_VISIBILITY CxaAllocateExceptionInst : public CallInst {
+  enum { Size };
+
+public:
+  Constant *getSize() const {
+    // TODO: decide on undef.
+    return cast<Constant>(getArgOperand(Size));
+  }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const CallInst *I) {
+    return CheckFnName(I, "__cxa_allocate_exception");
+  }
+  static bool classof(const Value *V) {
+    return isa<CallInst>(V) && classof(cast<CallInst>(V));
+  }
+};
+
+/// This represents the __cxa_begin_catch instruction.
+class LLVM_LIBRARY_VISIBILITY CxaBeginCatch : public CallInst {
+public:
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const CallInst *I) {
+    if (auto *CalledF = I->getCalledFunction())
+      if (CalledF->getName() == "__cxa_begin_catch")
+        return true;
+    return false;
+  }
+  static bool classof(const Value *V) {
+    return isa<CallInst>(V) && classof(cast<CallInst>(V));
+  }
+};
+
 /// This represents the __cxa_throw instruction.
 class LLVM_LIBRARY_VISIBILITY CxaThrowInst : public InvokeInst {
   enum { ExceptionObject, TypeInfo, Destructor };
 
 public:
+  CxaAllocateExceptionInst *getExceptionObject() const {
+    // TODO: decide on undef.
+    return cast<CxaAllocateExceptionInst>(getArgOperand(ExceptionObject));
+  }
+
   Constant *getTypeInfo() const {
     if (auto *TI = dyn_cast<Constant>(getArgOperand(TypeInfo)))
       return TI->stripPointerCasts();
@@ -70,6 +108,12 @@ public:
     return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
   }
 };
+
+// The cxa_allocate_exceptions can be shared between several throw instructions.
+// While a sophisticated analysis can gracefully split them among different
+// users, for now, if we have a throw candidate that shares its exception
+// memory with some other throw that is not being shortcicuited, remove it
+// from the list of candidates.
 
 struct BlockColor {
   std::bitset<2> Colors;
@@ -140,7 +184,109 @@ static bool handleShortCircuitBranch(BranchInst *Br, LandingPadInst *LP,
   return false;
 }
 
-bool examineBlocksAndSimplify(LandingPadInst *LP, Constant *TypeInfo) {
+static bool updateThrows(LandingPadInst *LP,
+                         SmallPtrSetImpl<CxaThrowInst *> &Throws) {
+
+  // Classify all users of LPAD
+  // 1. resume => should be undef, since it will be on dead branches
+  // 2. extractvalue 0 and extractvalue 1, classify those independently
+
+  TinyPtrVector<CxaBeginCatch *> Catches;
+  TinyPtrVector<ICmpInst *> Compares;
+
+  for (const auto &User : LP->users()) {
+    User->dump();
+    if (auto *EI = dyn_cast<ExtractValueInst>(User)) {
+      if (EI->getNumIndices() != 1)
+        return false;
+
+      const auto Index = *EI->idx_begin();
+      if (Index == 0) {
+        for (const auto &User : EI->users())
+          if (auto *BegCatch = dyn_cast<CxaBeginCatch>(User))
+            Catches.push_back(BegCatch);
+          else {
+            dbgs() << "UNEXPECTED USER OF ExceptionObject: ";
+            User->dump();
+            return false;
+          }
+      } else if (Index == 1) {
+        for (const auto &User : EI->users())
+          // Should be ICmp
+          if (auto *Cmp = dyn_cast<ICmpInst>(User))
+            Compares.push_back(Cmp);
+          else {
+            dbgs() << "UNEXPECTED USER OF TypeInfo: ";
+            User->dump();
+            return false;
+          }
+      } else {
+        dbgs() << "UNEXPECTED Index when unpacking Lpad result: ";
+        EI->dump();
+        return false;
+      }
+    } else if (!isa<ResumeInst>(User)) {
+      // Unexpected user. Don't know what to do with it.
+      dbgs() << "UNEXPECTED USER OF LPAD: ";
+      User->dump();
+      return false;
+    }
+  }
+
+  // When we were duplicating, we should have already
+  // clone only the blocks related to the exception
+  // being shortcicuited. We expect to see only one
+  // icmp and one catch.
+
+  if (Compares.size() != 1 || Catches.size() != 1) {
+    dbgs() << "UNEXPECTED NUMBER OF Icmps " << Compares.size()
+           << " and Catches " << Catches.size() << "\n";
+    return false;
+  }
+
+  dbgs() << "CATCHES: \n";
+  for (auto *Catch : Catches)
+    Catch->dump();
+
+  dbgs() << "ICMPs: \n";
+  for (auto *Compare : Compares)
+    Compare->dump();
+
+  return true;
+}
+
+static void trimUsersIfNotAllEligibleForShortCircuit(
+    CxaAllocateExceptionInst *EhAlloc,
+    SmallPtrSetImpl<CxaThrowInst *> &Throws) {
+
+  bool AllThrowsEligible = true;
+  for (const auto &User : EhAlloc->users())
+    if (auto *Throw = dyn_cast<CxaThrowInst>(User))
+      if (Throws.count(Throw) == 0) {
+        AllThrowsEligible = false;
+        break;
+      }
+
+  if (AllThrowsEligible)
+    return;
+
+  dbgs() << "Found ineligible cxa_allocate_exception: ";
+  EhAlloc->dump();
+
+  // TODO: Add erase_if for the set.
+  SmallVector<CxaThrowInst *, 4> RemoveCandidates;
+  for (auto *TI : Throws)
+    if (TI->getExceptionObject() == EhAlloc)
+      RemoveCandidates.push_back(TI);
+
+  for (auto *TI : RemoveCandidates) {
+    dbgs() << "REMOVE: ";
+    TI->dump();
+    Throws.erase(TI);
+  }
+}
+
+static bool examineBlocksAndSimplify(LandingPadInst *LP, Constant *TypeInfo) {
   DenseMap<BasicBlock *, BlockColor> BlockColors;
   SmallVector<std::pair<BasicBlock *, BlockColor>, 16> Worklist;
   SmallVector<CallInst *, 4> CatchEnds;
@@ -257,16 +403,29 @@ bool examineBlocksAndSimplify(LandingPadInst *LP, Constant *TypeInfo) {
   // DO THE WORK
 
   // Find all the throws.
-  TinyPtrVector<CxaThrowInst *> Throws;
+  SmallPtrSet<CxaThrowInst *, 4> Throws;
+  SmallPtrSet<CxaAllocateExceptionInst *, 4> EhAllocs;
+
   for (BasicBlock *Pred : predecessors(LP->getParent()))
     if (auto *Throw = dyn_cast<CxaThrowInst>(Pred->getTerminator()))
-      if (TypeInfo == Throw->getTypeInfo())
-        Throws.push_back(Throw);
+      if (TypeInfo == Throw->getTypeInfo()) {
+        Throws.insert(Throw);
+        EhAllocs.insert(Throw->getExceptionObject());
+      }
 
   if (Throws.empty())
     return false;
 
-  BasicBlock *UnreachBB = Throws[0]->getNormalDest();
+  // Check that none of the referred allocas have throws that are not in the
+  // list of the ones being short-circuited.
+
+  for (CxaAllocateExceptionInst *EhAlloc : EhAllocs)
+    trimUsersIfNotAllEligibleForShortCircuit(EhAlloc, Throws);
+
+  if (Throws.empty())
+    return false;
+
+  BasicBlock *UnreachBB = (*Throws.begin())->getNormalDest();
 
   // Need to duplicate all of the blocks that has 0 in them.
   ValueToValueMapTy VMap;
@@ -290,16 +449,10 @@ bool examineBlocksAndSimplify(LandingPadInst *LP, Constant *TypeInfo) {
   for (auto &Entry : Orig2Clone) {
     for (Instruction &I : *Entry.second)
       RemapInstruction(&I, VMap,
-                        RF_IgnoreMissingLocals | RF_NoModuleLevelChanges);
+                       RF_IgnoreMissingLocals | RF_NoModuleLevelChanges);
   }
 
-  auto *CLP = cast<LandingPadInst>(VMap[LP]);
-  CLP->dump();
-
-  for (const auto &User : CLP->users())
-    User->dump();
-
-  return true;
+  return updateThrows(cast<LandingPadInst>(VMap[LP]), Throws);
 }
 
 namespace {
@@ -349,21 +502,8 @@ struct ShortCircuitThrowWorker {
 };
 } // namespace
 
+#if 0
 bool trySimplify(CxaThrowInst *) { return nullptr; }
-/// This represents the __cxa_throw instruction.
-class LLVM_LIBRARY_VISIBILITY CxaBeginCatch : public CallInst {
-public:
-  // Methods to support type inquiry through isa, cast, and dyn_cast:
-  static bool classof(const CallInst *I) {
-    if (auto *CalledF = I->getCalledFunction())
-      if (CalledF->getName() == "__cxa_begin_catch")
-        return true;
-    return false;
-  }
-  static bool classof(const Value *V) {
-    return isa<CallInst>(V) && classof(cast<CallInst>(V));
-  }
-};
 
 // TODO: Fix comment:
 // At the moment, C++ exception simplification is limited to removal of try
@@ -587,6 +727,7 @@ struct ThrowSimplifier {
   }
 };
 } // namespace
+#endif
 
 static bool simplifyGNU_CXX(Function &F) {
   bool anyChanges = false;
