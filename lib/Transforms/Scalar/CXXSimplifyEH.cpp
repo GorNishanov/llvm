@@ -17,6 +17,8 @@
 #include "llvm/Support/circular_raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+
 
 using namespace llvm;
 
@@ -70,21 +72,32 @@ public:
 };
 
 struct BlockColor {
-  std::bitset<2> Colors{1};
-  unsigned Nesting = 0;
+  std::bitset<2> Colors;
+  int Nesting = -1;
 
-  std::string getName() {
+  bool contains(std::bitset<2> Val) const {
+    Val &= ~Colors;
+    return Val.none();
+  }
+
+  std::string getName() const {
     std::string result;
-    if (Colors[0]) result.push_back('0');
-    if (Colors[1]) result.push_back('1');
+    if (Colors[0])
+      result.push_back('0');
+    if (Colors[1])
+      result.push_back('1');
     return result;
+  }
+
+  bool wontShortcircuitUnknownFunction() const {
+    return Colors[0] && Nesting == 0;
   }
 };
 
-enum {TYPEID_INDEX = 1};
+enum { TYPEID_INDEX = 1 };
 
 static bool handleShortCircuitBranch(BranchInst *Br, LandingPadInst *LP,
-                              Constant *TypeInfo) {
+                                     Constant *TypeInfo) {
   if (Br->isUnconditional())
     return false;
 
@@ -127,18 +140,20 @@ static bool handleShortCircuitBranch(BranchInst *Br, LandingPadInst *LP,
   return false;
 }
 
-bool examineBlocks(LandingPadInst* LP, Constant* TypeInfo) {
-  DenseMap<BasicBlock *, BlockColor> Colors;
-  SmallVector<std::pair<BasicBlock*, BlockColor>, 16> Worklist;
+bool examineBlocksAndSimplify(LandingPadInst *LP, Constant *TypeInfo) {
+  DenseMap<BasicBlock *, BlockColor> BlockColors;
+  SmallVector<std::pair<BasicBlock *, BlockColor>, 16> Worklist;
   SmallVector<CallInst *, 4> CatchEnds;
   SmallVector<InvokeInst *, 4> CatchEndInvokes;
   bool UnknownFunctionInCleanup = false;
 
   BasicBlock *InitialBlock = LP->getParent();
   BlockColor InitialColor;
+  InitialColor.Colors.set(0);
   if (!InitialBlock->getSinglePredecessor()) {
     InitialColor.Colors.set(1);
   }
+  InitialColor.Nesting = 0;
 
   Worklist.push_back({InitialBlock, InitialColor});
 
@@ -151,53 +166,138 @@ bool examineBlocks(LandingPadInst* LP, Constant* TypeInfo) {
     dbgs() << "Visiting " << Visiting->getName() << " " << Color.getName()
            << " nest: " << Color.Nesting << "\n";
 
+    BlockColor &Colors = BlockColors[Visiting];
+    dbgs() << "Old color " << Colors.getName() << " nest: " << Colors.Nesting
+           << "\n";
+    if (Colors.Nesting != -1)
+      assert(Colors.Nesting == Color.Nesting && "Nesting Must Match");
+
+    if (Colors.contains(Color.Colors)) {
+      dbgs() << "SKIPPING. No color change\n";
+      continue;
+    }
+    Colors.Colors |= Color.Colors;
+
+    // TODO: add DEBUG_WITH_TYPE
+    dbgs() << "Assigned new color " << Colors.getName() << "\n";
+
     Instruction *Current = Visiting->getFirstNonPHIOrDbgOrLifetime();
     while (!Current->isTerminator()) {
-      if (isa<IntrinsicInst>(Current))
+      if (isa<LandingPadInst>(Current))
+        ++Color.Nesting;
+      else if (isa<IntrinsicInst>(Current))
         ; // assume intrinsics are safe
       else if (auto *CI = dyn_cast<CallInst>(Current)) {
-        if (CheckFnName(CI, "__cxa_end_catch")) {
-          if (Color.Nesting == 0) {
-            CatchEnds.push_back(CI);
+        if (CheckFnName(CI, "__cxa_begin_catch")) {
+          assert(Color.Nesting > 0 && "unexpected nesting");
+          --Color.Nesting;
+        } else if (CheckFnName(CI, "__cxa_end_catch")) {
+          ++Color.Nesting;
+          if (Color.Nesting == 1) {
             Current = Visiting->getTerminator();
-            break; // need to go to next block
+            goto pull_next_block;
           }
-          else
-            --Color.Nesting;
-        }
-        else if (CheckFnName(CI, "__clang_call_terminate"))
+        } else if (CheckFnName(CI, "__clang_call_terminate"))
           ; // Do Nothing (Yet), but we may take advantage of this later.
 
         // If we encounter an unknown function in the catch, don't shortcircuit
         // for now.
-        else if (Color.Nesting == 0)
+        else if (Color.wontShortcircuitUnknownFunction())
           return false;
         else
           UnknownFunctionInCleanup = true;
       }
       Current = Current->getNextNode();
     }
+
     if (auto *Inv = dyn_cast<InvokeInst>(Current)) {
-        if (CheckFnName(Inv, "__cxa_end_catch")) {
-          if (Color.Nesting == 0)
-            CatchEndInvokes.push_back(Inv);
-          else
-            --Color.Nesting;
-        }
-        // If we encounter an unknown function in the catch, don't shortcircuit
-        // for now.
-        else if (Color.Nesting == 0)
-          return false;
+      if (CheckFnName(Inv, "__cxa_end_catch")) {
+        ++Color.Nesting;
+        if (Color.Nesting == 1)
+          CatchEndInvokes.push_back(Inv);
         else
-          UnknownFunctionInCleanup = true;
-    }
-    else if (Color.Nesting == 0) {
+          --Color.Nesting;
+      }
+      // If we encounter an unknown function in the catch, don't shortcircuit
+      // for now.
+      else if (Color.wontShortcircuitUnknownFunction())
+        return false;
+      else
+        UnknownFunctionInCleanup = true;
+    } else if (Color.Nesting == 1) {
       if (auto *Br = dyn_cast<BranchInst>(Current))
-        if (handleShortCircuitBranch(Br, LP, TypeInfo))
-          ;
+        if (handleShortCircuitBranch(Br, LP, TypeInfo)) {
+          // For now assume it is always the left branch.
+          auto ColorLeft = Color;
+          auto ColorRight = Color;
+          ColorLeft.Colors.reset(1);
+          ColorRight.Colors.reset(0);
+          Worklist.push_back({Br->getSuccessor(0), ColorLeft});
+          Worklist.push_back({Br->getSuccessor(1), ColorRight});
+          continue;
+        }
+    }
+    for (BasicBlock *Succ : successors(Visiting))
+      Worklist.push_back({Succ, Color});
+  pull_next_block:;
+  }
+
+  dbgs() << "-----------------------------------------\n";
+
+  for (auto const &Entry : BlockColors) {
+    BasicBlock *Visiting;
+    BlockColor Color;
+    std::tie(Visiting, Color) = Entry;
+
+    // TODO: add DEBUG_WITH_TYPE
+    dbgs() << "Block \"" << Visiting->getName() << "\" => " << Color.getName()
+           << " nest: " << Color.Nesting << "\n";
+  }
+
+  // DO THE WORK
+
+  // Find all the throws.
+  TinyPtrVector<CxaThrowInst *> Throws;
+  for (BasicBlock *Pred : predecessors(LP->getParent()))
+    if (auto *Throw = dyn_cast<CxaThrowInst>(Pred->getTerminator()))
+      if (TypeInfo == Throw->getTypeInfo())
+        Throws.push_back(Throw);
+
+  if (Throws.empty())
+    return false;
+
+  BasicBlock *UnreachBB = Throws[0]->getNormalDest();
+
+  // Need to duplicate all of the blocks that has 0 in them.
+  ValueToValueMapTy VMap;
+  std::vector<std::pair<BasicBlock *, BasicBlock *>> Orig2Clone;
+  for (auto const &Entry : BlockColors) {
+    BasicBlock *BB;
+    BlockColor Color;
+    std::tie(BB, Color) = Entry;
+
+    if (!Color.Colors[0]) {
+      VMap[BB] = UnreachBB;
+      continue;
     }
 
+    BasicBlock *CBB = CloneBasicBlock(BB, VMap, ".sc");
+    CBB->insertInto(BB->getParent(), BB->getNextNode());
+    VMap[BB] = CBB;
+    Orig2Clone.emplace_back(BB, CBB);
   }
+
+  for (auto &Entry : Orig2Clone) {
+    for (Instruction &I : *Entry.second)
+      RemapInstruction(&I, VMap,
+                        RF_IgnoreMissingLocals | RF_NoModuleLevelChanges);
+  }
+
+  auto *CLP = cast<LandingPadInst>(VMap[LP]);
+  CLP->dump();
+
+  for (const auto &User : CLP->users())
+    User->dump();
 
   return true;
 }
@@ -206,11 +306,10 @@ namespace {
 
 struct ShortCircuitThrowWorker {
   LandingPadInst *LandingPad;
-  TinyPtrVector<CxaThrowInst*> Throws;
   Constant *TypeInfo;
 
   ShortCircuitThrowWorker() {}
-  ShortCircuitThrowWorker(ShortCircuitThrowWorker const&) = delete;
+  ShortCircuitThrowWorker(ShortCircuitThrowWorker const &) = delete;
 
   bool isShortCircuitCandidate(BasicBlock &BB) {
     // It is a throw instruction.
@@ -241,16 +340,14 @@ struct ShortCircuitThrowWorker {
 
   bool trySimplify(BasicBlock &BB) {
     if (isShortCircuitCandidate(BB)) {
-      if (examineBlocks(LandingPad, TypeInfo))
+      if (examineBlocksAndSimplify(LandingPad, TypeInfo))
         return true;
     }
 
     return false;
   }
-
-
 };
-}
+} // namespace
 
 bool trySimplify(CxaThrowInst *) { return nullptr; }
 /// This represents the __cxa_throw instruction.
