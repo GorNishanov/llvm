@@ -286,12 +286,15 @@ static void trimUsersIfNotAllEligibleForShortCircuit(
   }
 }
 
-static bool examineBlocksAndSimplify(LandingPadInst *LP, Constant *TypeInfo) {
+static bool examineBlocksAndSimplify(LandingPadInst *LP) {
   DenseMap<BasicBlock *, BlockColor> BlockColors;
   SmallVector<std::pair<BasicBlock *, BlockColor>, 16> Worklist;
   SmallVector<CallInst *, 4> CatchEnds;
   SmallVector<InvokeInst *, 4> CatchEndInvokes;
   bool UnknownFunctionInCleanup = false;
+
+  // Candidate LP must have at least one clause.
+  Constant *TypeInfo = LP->getClause(0)->stripPointerCasts();
 
   BasicBlock *InitialBlock = LP->getParent();
   BlockColor InitialColor;
@@ -455,52 +458,30 @@ static bool examineBlocksAndSimplify(LandingPadInst *LP, Constant *TypeInfo) {
   return updateThrows(cast<LandingPadInst>(VMap[LP]), Throws);
 }
 
-namespace {
+static LandingPadInst* isShortCircuitCandidate(BasicBlock &BB) {
+  // It is a throw instruction.
+  auto *Throw = dyn_cast<CxaThrowInst>(BB.getTerminator());
+  if (!Throw)
+    return nullptr;
 
-struct ShortCircuitThrowWorker {
-  LandingPadInst *LandingPad;
-  Constant *TypeInfo;
+  // It unwinds into a landing pad.
+  auto *Lpad = Throw->getUnwindDest()->getLandingPadInst();
+  if (!Lpad)
+    return nullptr;
 
-  ShortCircuitThrowWorker() {}
-  ShortCircuitThrowWorker(ShortCircuitThrowWorker const &) = delete;
+  // The type being thrown is the first type in the catch clause.
+  if (Lpad->getNumClauses() == 0 || !Lpad->isCatch(0))
+    return nullptr;
 
-  bool isShortCircuitCandidate(BasicBlock &BB) {
-    // It is a throw instruction.
-    auto *Throw = dyn_cast<CxaThrowInst>(BB.getTerminator());
-    if (!Throw)
-      return nullptr;
+  Constant *CatchClause = Lpad->getClause(0);
+  Constant *CatchTypeInfo = CatchClause->stripPointerCasts();
 
-    // It unwinds into a landing pad.
-    auto *Lpad = Throw->getUnwindDest()->getLandingPadInst();
-    if (!Lpad)
-      return nullptr;
+  auto *ThrowTypeInfo = Throw->getTypeInfo();
+  if (ThrowTypeInfo != CatchTypeInfo)
+    return nullptr;
 
-    // The type being thrown is the first type in the catch clause.
-    if (Lpad->getNumClauses() == 0 || !Lpad->isCatch(0))
-      return nullptr;
-
-    Constant *CatchClause = Lpad->getClause(0);
-    Constant *CatchTypeInfo = CatchClause->stripPointerCasts();
-
-    auto *ThrowTypeInfo = Throw->getTypeInfo();
-    if (ThrowTypeInfo != CatchTypeInfo)
-      return nullptr;
-
-    this->TypeInfo = ThrowTypeInfo;
-    this->LandingPad = Lpad;
-    return true;
-  }
-
-  bool trySimplify(BasicBlock &BB) {
-    if (isShortCircuitCandidate(BB)) {
-      if (examineBlocksAndSimplify(LandingPad, TypeInfo))
-        return true;
-    }
-
-    return false;
-  }
-};
-} // namespace
+  return Lpad;
+}
 
 #if 0
 bool trySimplify(CxaThrowInst *) { return nullptr; }
@@ -731,17 +712,15 @@ struct ThrowSimplifier {
 
 static bool simplifyGNU_CXX(Function &F) {
   bool anyChanges = false;
-  bool changed = false;
-  ShortCircuitThrowWorker ShortCircuitWorker;
-  do {
-    for (auto &BB : F) {
-      if (ShortCircuitWorker.trySimplify(BB)) {
-        changed = true;
-        anyChanges |= true;
-        break;
-      }
-    }
-  } while (changed);
+  SmallPtrSet<LandingPadInst *, 4> SimplificationCandidates;
+
+  for (auto &BB : F)
+    if (LandingPadInst *LP = isShortCircuitCandidate(BB))
+      SimplificationCandidates.insert(LP);
+
+  for (auto *LP : SimplificationCandidates)
+    anyChanges |= examineBlocksAndSimplify(LP);
+
   return anyChanges;
 }
 
