@@ -69,10 +69,16 @@ class LLVM_LIBRARY_VISIBILITY CxaThrowInst : public InvokeInst {
   enum { ExceptionObject, TypeInfo, Destructor };
 
 public:
+  Value *getRawExceptionObject() const {
+    return getArgOperand(ExceptionObject);
+  }
+
   CxaAllocateExceptionInst *getExceptionObject() const {
     // TODO: decide on undef.
-    return cast<CxaAllocateExceptionInst>(getArgOperand(ExceptionObject));
+    return cast<CxaAllocateExceptionInst>(getRawExceptionObject());
   }
+
+  Function* getDestructor() const { return nullptr; }
 
   Constant *getTypeInfo() const {
     if (auto *TI = dyn_cast<Constant>(getArgOperand(TypeInfo)))
@@ -184,8 +190,60 @@ static bool handleShortCircuitBranch(BranchInst *Br, LandingPadInst *LP,
   return false;
 }
 
+static void simplifyCompare(ICmpInst *Cmp) {
+// Compare should look like this:
+//
+//     %27 = tail call i32 @llvm.eh.typeid.for(i8* bitcast ({ i8*, i8* }* @_ZTI6cancel to i8*)) #7
+//     %matches.sc2 = icmp eq i32 %7, %27
+//     br i1 %matches.sc2, label %catch9.sc16, label %unreachable
+//
+//  Replace with:
+//
+//     br i1 true, label %catch9.sc16, label %unreachable
+
+  auto *TypeIdInst = dyn_cast<EhTypeidForInst>(Cmp->getOperand(0));
+  if (!TypeIdInst) {
+    // Already confirmed this when checking eligibility.
+    TypeIdInst = cast<EhTypeidForInst>(Cmp->getOperand(1));
+  }
+
+  auto *True = ConstantInt::getTrue(Cmp->getContext());
+  Cmp->replaceAllUsesWith(True);
+  Cmp->eraseFromParent();
+
+  if (TypeIdInst->use_empty())
+    TypeIdInst->eraseFromParent();
+}
+
 static bool updateThrows(LandingPadInst *LP,
                          SmallPtrSetImpl<CxaThrowInst *> &Throws) {
+
+  // Replace all __cxa_allocate_exception with Alloca
+  Function &F = *LP->getParent()->getParent();
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  auto &EntryBlock = F.getEntryBlock();
+
+  // TODO: Function *Dtor = (*Throws.begin())->getDestructor();
+
+  // In case we have more than one alloca, we will need to create a phi
+  // node joining allocas from multiple throws. Remember them here.
+  SmallVector<std::pair<AllocaInst*, BasicBlock*>, 2> ThrowEdgesWithAllocas;
+
+  for (CxaThrowInst *Th: Throws) {
+    auto *AI = dyn_cast<AllocaInst>(Th->getRawExceptionObject());
+    if (!AI) {
+      CxaAllocateExceptionInst *EO = Th->getExceptionObject();
+      AI = new AllocaInst(Type::getInt8Ty(LP->getContext()),
+                          DL.getAllocaAddrSpace(), EO->getSize(), "",
+                          &EntryBlock.front());
+      AI->takeName(EO);
+      EO->replaceAllUsesWith(AI);
+      EO->eraseFromParent();
+    }
+
+    BranchInst::Create(LP->getParent(), Th);
+    Th->eraseFromParent();
+  }
 
   // Classify all users of LPAD
   // 1. resume => should be undef, since it will be on dead branches
@@ -248,9 +306,8 @@ static bool updateThrows(LandingPadInst *LP,
   for (auto *Catch : Catches)
     Catch->dump();
 
-  dbgs() << "ICMPs: \n";
   for (auto *Compare : Compares)
-    Compare->dump();
+    simplifyCompare(Compare);
 
   return true;
 }
