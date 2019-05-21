@@ -215,8 +215,10 @@ static void simplifyCompare(ICmpInst *Cmp) {
     TypeIdInst->eraseFromParent();
 }
 
-static bool updateThrows(LandingPadInst *LP,
+static bool updateThrows(ValueToValueMapTy &VMap, LandingPadInst *OrigLP,
+                         SmallVectorImpl<CallInst *> const &OrigCatchEnds,
                          SmallPtrSetImpl<CxaThrowInst *> &Throws) {
+  auto * const LP = cast<LandingPadInst>(VMap[OrigLP]);
 
   // Replace all __cxa_allocate_exception with Alloca
   Function &F = *LP->getParent()->getParent();
@@ -227,7 +229,7 @@ static bool updateThrows(LandingPadInst *LP,
 
   // In case we have more than one alloca, we will need to create a phi
   // node joining allocas from multiple throws. Remember them here.
-  SmallVector<std::pair<AllocaInst*, BasicBlock*>, 2> ThrowEdgesWithAllocas;
+  SmallVector<std::pair<AllocaInst*, BasicBlock*>, 1> ThrowEdgesWithAllocas;
 
   for (CxaThrowInst *Th: Throws) {
     auto *AI = dyn_cast<AllocaInst>(Th->getRawExceptionObject());
@@ -242,7 +244,22 @@ static bool updateThrows(LandingPadInst *LP,
     }
 
     BranchInst::Create(LP->getParent(), Th);
+
+    ThrowEdgesWithAllocas.emplace_back(AI, Th->getParent());
     Th->eraseFromParent();
+  }
+
+  // Optimistically assume that we only have one edge.
+  Value *BeginCatchReplacement = ThrowEdgesWithAllocas.front().first;
+  const auto IncomingEdges = ThrowEdgesWithAllocas.size();
+  if (IncomingEdges > 1) {
+    // Otherwise, create a Phi instruction.
+    auto *PN = PHINode::Create(BeginCatchReplacement->getType(), IncomingEdges,
+                               "", &LP->getParent()->front());
+    for (auto Edge: ThrowEdgesWithAllocas)
+      PN->addIncoming(Edge.first, Edge.second);
+
+    BeginCatchReplacement = PN;
   }
 
   // Classify all users of LPAD
@@ -302,12 +319,28 @@ static bool updateThrows(LandingPadInst *LP,
     return false;
   }
 
-  dbgs() << "CATCHES: \n";
-  for (auto *Catch : Catches)
-    Catch->dump();
+  for (auto *Catch: Catches) {
+    Catch->replaceAllUsesWith(BeginCatchReplacement);
+    Catch->eraseFromParent();
+  }
+
+  for (auto *OrigEnd : OrigCatchEnds) {
+    // If catch belongs to the shortcicuit type, it will be cloned, if so,
+    // VMap will have a mapping for it.
+    if (auto *End = cast_or_null<CallInst>(VMap[OrigEnd])) {
+      // TODO: Add dtor call.
+      End->eraseFromParent();
+    }
+  }
 
   for (auto *Compare : Compares)
     simplifyCompare(Compare);
+
+  // TODO: Be smarter and cleanup all of the users.
+  // Replace LandingPad with undef and remove it.
+  auto *Undef = UndefValue::get(LP->getType());
+  LP->replaceAllUsesWith(Undef);
+  LP->eraseFromParent();
 
   return true;
 }
@@ -400,7 +433,7 @@ static bool examineBlocksAndSimplify(LandingPadInst *LP) {
         } else if (CheckFnName(CI, "__cxa_end_catch")) {
           ++Color.Nesting;
           if (Color.Nesting == 1) {
-            Current = Visiting->getTerminator();
+            CatchEnds.push_back(CI);
             goto pull_next_block;
           }
         } else if (CheckFnName(CI, "__clang_call_terminate"))
@@ -485,8 +518,12 @@ static bool examineBlocksAndSimplify(LandingPadInst *LP) {
   if (Throws.empty())
     return false;
 
+  // TODO: If EndCatch blocks are shared and there are more instructions after
+  // the end.catch besides terminator. Split the end catch block.
+
   BasicBlock *UnreachBB = (*Throws.begin())->getNormalDest();
 
+  // TODO: Do not duplicate if there is no other throw edges of different types.
   // Need to duplicate all of the blocks that has 0 in them.
   ValueToValueMapTy VMap;
   std::vector<std::pair<BasicBlock *, BasicBlock *>> Orig2Clone;
@@ -512,7 +549,7 @@ static bool examineBlocksAndSimplify(LandingPadInst *LP) {
                        RF_IgnoreMissingLocals | RF_NoModuleLevelChanges);
   }
 
-  return updateThrows(cast<LandingPadInst>(VMap[LP]), Throws);
+  return updateThrows(VMap, LP, CatchEnds, Throws);
 }
 
 static LandingPadInst* isShortCircuitCandidate(BasicBlock &BB) {
