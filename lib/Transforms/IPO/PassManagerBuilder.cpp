@@ -355,6 +355,14 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   if (SizeLevel == 0)
     MPM.add(createPGOMemOPSizeOptLegacyPass());
 
+  // XXX: GORHACK
+  if (OptLevel > 2) {
+    MPM.add(createCXXExceptionSimplificationPass());
+    MPM.add(createJumpThreadingPass());         // Thread jumps.
+    MPM.add(createCorrelatedValuePropagationPass()); // Propagate conditionals
+    MPM.add(createCFGSimplificationPass());     // Merge & remove BBs
+  }
+
   MPM.add(createTailCallEliminationPass()); // Eliminate tail calls
   MPM.add(createCFGSimplificationPass());     // Merge & remove BBs
   MPM.add(createReassociatePass());           // Reassociate expressions

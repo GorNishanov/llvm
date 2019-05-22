@@ -78,7 +78,14 @@ public:
     return cast<CxaAllocateExceptionInst>(getRawExceptionObject());
   }
 
-  Function* getDestructor() const { return nullptr; }
+  Function *getDestructor() const {
+    auto *Raw = getArgOperand(Destructor);
+    if (auto *TI = dyn_cast<Constant>(Raw))
+      if (auto *Fn = dyn_cast<Function>(TI->stripPointerCasts()))
+        return Fn;
+
+    return nullptr;
+  }
 
   Constant *getTypeInfo() const {
     if (auto *TI = dyn_cast<Constant>(getArgOperand(TypeInfo)))
@@ -191,15 +198,15 @@ static bool handleShortCircuitBranch(BranchInst *Br, LandingPadInst *LP,
 }
 
 static void simplifyCompare(ICmpInst *Cmp) {
-// Compare should look like this:
-//
-//     %27 = tail call i32 @llvm.eh.typeid.for(i8* bitcast ({ i8*, i8* }* @_ZTI6cancel to i8*)) #7
-//     %matches.sc2 = icmp eq i32 %7, %27
-//     br i1 %matches.sc2, label %catch9.sc16, label %unreachable
-//
-//  Replace with:
-//
-//     br i1 true, label %catch9.sc16, label %unreachable
+  // Compare should look like this:
+  //
+  //     %27 = tail call i32 @llvm.eh.typeid.for(i8* bitcast ({ i8*, i8* }*
+  //     @_ZTI6cancel to i8*)) #7 %matches.sc2 = icmp eq i32 %7, %27 br i1
+  //     %matches.sc2, label %catch9.sc16, label %unreachable
+  //
+  //  Replace with:
+  //
+  //     br i1 true, label %catch9.sc16, label %unreachable
 
   auto *TypeIdInst = dyn_cast<EhTypeidForInst>(Cmp->getOperand(0));
   if (!TypeIdInst) {
@@ -215,23 +222,39 @@ static void simplifyCompare(ICmpInst *Cmp) {
     TypeIdInst->eraseFromParent();
 }
 
+static void addDestructorCall(CallInst *End, Value *BeginCatchReplacement,
+                              Function *Dtor) {
+  FunctionType *FnTy = Dtor->getFunctionType();
+  if (FnTy->getNumParams() != 1)
+    report_fatal_error("unexpcted number of args to a destructor call");
+
+  Type *ParamTy = FnTy->getParamType(0);
+  if (ParamTy != BeginCatchReplacement->getType())
+    BeginCatchReplacement =
+        new BitCastInst(BeginCatchReplacement, ParamTy, "", End);
+
+  CallInst::Create(FnTy, Dtor, BeginCatchReplacement, "", End);
+}
+
 static bool updateThrows(ValueToValueMapTy &VMap, LandingPadInst *OrigLP,
                          SmallVectorImpl<CallInst *> const &OrigCatchEnds,
                          SmallPtrSetImpl<CxaThrowInst *> &Throws) {
-  auto * const LP = cast<LandingPadInst>(VMap[OrigLP]);
+  auto *const LP = cast<LandingPadInst>(VMap[OrigLP]);
 
   // Replace all __cxa_allocate_exception with Alloca
   Function &F = *LP->getParent()->getParent();
   const DataLayout &DL = F.getParent()->getDataLayout();
   auto &EntryBlock = F.getEntryBlock();
 
-  // TODO: Function *Dtor = (*Throws.begin())->getDestructor();
+  Function *Dtor = (*Throws.begin())->getDestructor();
+  if (Dtor)
+    Dtor->dump();
 
   // In case we have more than one alloca, we will need to create a phi
   // node joining allocas from multiple throws. Remember them here.
-  SmallVector<std::pair<AllocaInst*, BasicBlock*>, 1> ThrowEdgesWithAllocas;
+  SmallVector<std::pair<AllocaInst *, BasicBlock *>, 1> ThrowEdgesWithAllocas;
 
-  for (CxaThrowInst *Th: Throws) {
+  for (CxaThrowInst *Th : Throws) {
     auto *AI = dyn_cast<AllocaInst>(Th->getRawExceptionObject());
     if (!AI) {
       CxaAllocateExceptionInst *EO = Th->getExceptionObject();
@@ -256,7 +279,7 @@ static bool updateThrows(ValueToValueMapTy &VMap, LandingPadInst *OrigLP,
     // Otherwise, create a Phi instruction.
     auto *PN = PHINode::Create(BeginCatchReplacement->getType(), IncomingEdges,
                                "", &LP->getParent()->front());
-    for (auto Edge: ThrowEdgesWithAllocas)
+    for (auto Edge : ThrowEdgesWithAllocas)
       PN->addIncoming(Edge.first, Edge.second);
 
     BeginCatchReplacement = PN;
@@ -319,7 +342,7 @@ static bool updateThrows(ValueToValueMapTy &VMap, LandingPadInst *OrigLP,
     return false;
   }
 
-  for (auto *Catch: Catches) {
+  for (auto *Catch : Catches) {
     Catch->replaceAllUsesWith(BeginCatchReplacement);
     Catch->eraseFromParent();
   }
@@ -328,6 +351,8 @@ static bool updateThrows(ValueToValueMapTy &VMap, LandingPadInst *OrigLP,
     // If catch belongs to the shortcicuit type, it will be cloned, if so,
     // VMap will have a mapping for it.
     if (auto *End = cast_or_null<CallInst>(VMap[OrigEnd])) {
+      if (Dtor)
+        addDestructorCall(End, BeginCatchReplacement, Dtor);
       // TODO: Add dtor call.
       End->eraseFromParent();
     }
@@ -552,7 +577,7 @@ static bool examineBlocksAndSimplify(LandingPadInst *LP) {
   return updateThrows(VMap, LP, CatchEnds, Throws);
 }
 
-static LandingPadInst* isShortCircuitCandidate(BasicBlock &BB) {
+static LandingPadInst *isShortCircuitCandidate(BasicBlock &BB) {
   // It is a throw instruction.
   auto *Throw = dyn_cast<CxaThrowInst>(BB.getTerminator());
   if (!Throw)
