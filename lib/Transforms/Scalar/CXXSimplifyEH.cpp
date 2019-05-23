@@ -653,12 +653,12 @@ public:
 
 static EptrRethrowInst *isEptrShortCircuitCandidate(BasicBlock &BB) {
   // It is a throw instruction.
-  auto *Throw = dyn_cast<EptrRethrowInst>(BB.getTerminator());
-  if (!Throw)
+  auto *Rethrow = dyn_cast<EptrRethrowInst>(BB.getTerminator());
+  if (!Rethrow)
     return nullptr;
 
   // It unwinds into a landing pad.
-  auto *Lpad = Throw->getUnwindDest()->getLandingPadInst();
+  auto *Lpad = Rethrow->getUnwindDest()->getLandingPadInst();
   if (!Lpad)
     return nullptr;
 
@@ -673,15 +673,8 @@ static EptrRethrowInst *isEptrShortCircuitCandidate(BasicBlock &BB) {
 
   // For simplicity, only consider single predecessor landing pads.
   auto *LandingPadBB = Lpad->getParent();
-  if (LandingPadBB->getSinglePredecessor() == nullptr)
-    return nullptr;
-
-  // For simplicity, let's consider only single block catches.
-  auto *Term = LandingPadBB->getTerminator();
-  if (auto *CI = dyn_cast<CallInst>(Term->getPrevNode())) {
-    if (CheckFnName(CI, "__cxa_end_catch"))
-      return Throw;
-  }
+  if (LandingPadBB->getSinglePredecessor())
+    return Rethrow;
 
   return nullptr;
 }
@@ -710,6 +703,17 @@ struct EptrRethrowOptimizer {
 
   explicit operator bool() const { return Rethrow; }
 
+  static bool onlyUsedByLifetimeIntrinsics(BitCastInst *BC) {
+    for (const auto &User : BC->users()) {
+      if (auto *I = dyn_cast<Instruction>(User))
+        if (I->isLifetimeStartOrEnd())
+          continue;
+
+      return false;
+    }
+    return true;
+  }
+
   static CallInst *getCopyCtor(AllocaInst *AI) {
     int UserCount = 0;
     CallInst *CopyCtor = nullptr;
@@ -719,6 +723,9 @@ struct EptrRethrowOptimizer {
       if (auto *CI = dyn_cast<CallInst>(User)) {
         if (isEptrCopyCtor(CI))
           CopyCtor = CI;
+      } else if (auto *BC = dyn_cast<BitCastInst>(User)) {
+        if (onlyUsedByLifetimeIntrinsics(BC))
+          --UserCount; // Don't count it as use.
       }
     }
     // Should only be used by rethrow, copyctor and dtor.
@@ -779,15 +786,10 @@ struct EptrRethrowOptimizer {
   }
 
   bool getTheRestFromLandingPad() {
-    // We verified that the instruction before the last one is CxaEndCatch
-    // while checking whether this rethrow is an optimization candidate.
-    auto *const LandingPadBB = LandingPad->getParent();
-    CxaEnd = cast<CallInst>(LandingPadBB->getTerminator()->getPrevNode());
-    assert(CheckFnName(CxaEnd, "__cxa_end_catch"));
-
     // The rest of the interesting instructions are in the LandingPadBlock
     // between the LandingPadInst and the CxaCatchEnd.
-    for (Instruction *Current = LandingPad->getNextNode(); Current != CxaEnd;
+    for (Instruction *Current = LandingPad->getNextNode();
+         !Current->isTerminator();
          Current = Current->getNextNode()) {
       if (auto *CI = dyn_cast<CallInst>(Current)) {
         if (isEptrDtor(CI)) {
@@ -806,6 +808,9 @@ struct EptrRethrowOptimizer {
         } else if (isCurrentEptr(CI) && !CurrentEptr) {
           CurrentEptr = CI;
           continue;
+        } else if (CheckFnName(CI, "__cxa_end_catch") && !CxaEnd) {
+          CxaEnd = CI;
+          break;
         }
         // If any other call found or other checks failed, we are not in the
         // simple case. Bail out.
@@ -814,7 +819,7 @@ struct EptrRethrowOptimizer {
     }
 
     // Found all.
-    if (EptrDtor && CxaBegin && CurrentEptr)
+    if (EptrDtor && CxaBegin && CxaEnd && CurrentEptr)
       return true;
 
     return false;
