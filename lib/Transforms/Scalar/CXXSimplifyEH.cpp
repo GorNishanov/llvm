@@ -30,6 +30,14 @@ static bool CheckFnName(const CallBase *I, StringRef Name) {
   return false;
 }
 
+static bool CheckFnNames(const CallBase *I, StringRef Name1, StringRef Name2) {
+  if (auto *CalledF = I->getCalledFunction()) {
+    StringRef FnName = CalledF->getName();
+    return (FnName == Name1 || FnName == Name2);
+  }
+  return false;
+}
+
 /// This represents the cxa_allocate_exception instruction.
 class LLVM_LIBRARY_VISIBILITY CxaAllocateExceptionInst : public CallInst {
   enum { Size };
@@ -52,6 +60,14 @@ public:
 /// This represents the __cxa_begin_catch instruction.
 class LLVM_LIBRARY_VISIBILITY CxaBeginCatch : public CallInst {
 public:
+  // Try to find the landingpad for which this begin belongs in a simple case
+  // without memory stores or phi nodes interfering.
+  LandingPadInst *tryGetLandingPad() const {
+    if (auto *EI = dyn_cast<ExtractValueInst>(getArgOperand(0)))
+      return dyn_cast_or_null<LandingPadInst>(EI->getAggregateOperand());
+    return nullptr;
+  }
+
   // Methods to support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const CallInst *I) {
     if (auto *CalledF = I->getCalledFunction())
@@ -602,240 +618,224 @@ static LandingPadInst *isShortCircuitCandidate(BasicBlock &BB) {
   return Lpad;
 }
 
-#if 0
-bool trySimplify(CxaThrowInst *) { return nullptr; }
+////////////////////////////////////////////////////////////////////////////
+// Implementation of a simple exception_pointer shortcircuiting.
 
-// TODO: Fix comment:
-// At the moment, C++ exception simplification is limited to removal of try
-// catch in the following pattern:  try { whatever } catch(...) { throw; }
+static bool isEptrRethrow(const CallBase *I) {
+  return CheckFnNames(
+      I, "_ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE", // gcc
+      "_ZSt17rethrow_exceptionSt13exception_ptr"); // libcxx
+}
+static bool isEptrCopyCtor(const CallBase *I) {
+  return CheckFnNames(I, "_ZNSt15__exception_ptr13exception_ptrC1ERKS0_",
+                      "_ZNSt13exception_ptrC1ERKS_");
+}
+static bool isEptrDtor(const CallBase *I) {
+  return CheckFnNames(I, "_ZNSt15__exception_ptr13exception_ptrD1Ev",
+                      "_ZNSt13exception_ptrD1Ev");
+}
+static bool isCurrentEptr(const CallBase *I) {
+  return CheckFnName(I, "_ZSt17current_exceptionv");
+}
 
-// On GNU GCC EH Look for the pattern:
-//
-//    %4 = call i8* @__cxa_BeginCatch(i8* %3)
-//    invoke void @__cxa_throw() #6 to label % unreachable unwind label %lpad1
-//
-//  lpad1:;
-//    landingpad{i8 *, i32} cleanup
-//    invoke void @__cxa_end_catch() to label %invoke.cont2
-//
-// and replace it with:
-//    br %invoke.cont2
+/// This represents rethrow_exception(eptr) instruction.
+class LLVM_LIBRARY_VISIBILITY EptrRethrowInst : public InvokeInst {
+public:
+  AllocaInst *getExceptionAlloca() const {
+    return dyn_cast<AllocaInst>(getArgOperand(0));
+  }
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const InvokeInst *I) { return isEptrRethrow(I); }
+  static bool classof(const Value *V) {
+    return isa<InvokeInst>(V) && classof(cast<InvokeInst>(V));
+  }
+};
+
+static EptrRethrowInst *isEptrShortCircuitCandidate(BasicBlock &BB) {
+  // It is a throw instruction.
+  auto *Throw = dyn_cast<EptrRethrowInst>(BB.getTerminator());
+  if (!Throw)
+    return nullptr;
+
+  // It unwinds into a landing pad.
+  auto *Lpad = Throw->getUnwindDest()->getLandingPadInst();
+  if (!Lpad)
+    return nullptr;
+
+  // It has to have exactly one catch clause.
+  if (Lpad->getNumClauses() != 1 || !Lpad->isCatch(0))
+    return nullptr;
+
+  // It must be catch(...).
+  Constant *CatchClause = Lpad->getClause(0);
+  if (!isa<ConstantPointerNull>(CatchClause))
+    return nullptr;
+
+  // For simplicity, only consider single predecessor landing pads.
+  auto *LandingPadBB = Lpad->getParent();
+  if (LandingPadBB->getSinglePredecessor() == nullptr)
+    return nullptr;
+
+  // For simplicity, let's consider only single block catches.
+  auto *Term = LandingPadBB->getTerminator();
+  if (auto *CI = dyn_cast<CallInst>(Term->getPrevNode())) {
+    if (CheckFnName(CI, "__cxa_end_catch"))
+      return Throw;
+  }
+
+  return nullptr;
+}
 
 namespace {
-struct ThrowSimplifier {
-  CxaThrowInst *Throw;
-  //  CallInst *BeginCatch;
-  LandingPadInst *Lpad;
-  // InvokeInst *EndCatch;
+struct EptrRethrowOptimizer {
+  EptrRethrowInst *Rethrow = nullptr;
+  AllocaInst *EptrAlloca = nullptr;
+  CallInst *EptrCopyCtor = nullptr;
+  CallInst *EptrDtor = nullptr;
+  LandingPadInst *LandingPad = nullptr;
+  CallInst *CxaBegin = nullptr;
+  CallInst *CxaEnd = nullptr;
+  CallInst *CurrentEptr = nullptr;
 
-  ThrowSimplifier(ThrowSimplifier const &) = default;
+  EptrRethrowOptimizer(EptrRethrowInst *R)
+      : Rethrow(R), EptrAlloca(R->getExceptionAlloca()) {
+    if (EptrAlloca)
+      if ((EptrCopyCtor = getCopyCtor(EptrAlloca)))
+        if ((LandingPad = Rethrow->getUnwindDest()->getLandingPadInst()))
+          if (getTheRestFromLandingPad())
+            return;
 
-  // Checks for
-  //   1. Throws into a LandingPad with a single incoming edge
-  //   2. LandingPad has only one catch clause that matches the type being
-  //   thrown
-
-  explicit ThrowSimplifier(BasicBlock &BB) : Throw(getThrow(BB)) {
-    if (Throw)
-      if ((Lpad = getLpad(Throw)))
-        return;
-    Throw = nullptr;
+    Rethrow = nullptr;
   }
 
-  explicit operator bool() const { return Throw; }
+  explicit operator bool() const { return Rethrow; }
 
-  static CxaThrowInst *getThrow(BasicBlock &BB) {
-    if (auto Inv = dyn_cast<CxaThrowInst>(BB.getTerminator()))
-      return Inv;
-
-    return nullptr;
-  }
-
-#if 0
-  static CallInst *getBeginCatch(CxaThrowInst *Throw) {
-    if (auto *CI = dyn_cast_or_null<CallInst>(Throw->getPrevNode()))
-      if (auto *CalledFn = CI->getCalledFunction())
-        if (CalledFn->getName() == "__cxa_begin_catch")
-          if (CI->user_empty()) // If it has uses cannot simplify.
-            return CI;
-
-    return nullptr;
-  }
-
-  static InvokeInst *getEndCatch(LandingPadInst *Lpad) {
-    if (auto *CI = dyn_cast_or_null<InvokeInst>(Lpad->getNextNode()))
-      if (auto *CalledFn = CI->getCalledFunction())
-        if (CalledFn->getName() == "__cxa_end_catch")
-          return CI;
-
-    return nullptr;
-  }
-#endif
-  static LandingPadInst *getLpad(CxaThrowInst *Throw) {
-    auto *Lpad = Throw->getUnwindDest()->getLandingPadInst();
-    if (!Lpad)
-      return nullptr;
-
-    // TODO: Handle cases with multiple predecessor. That requires a bit of
-    // work of cloning blocks so that we can separate the short-cicuit
-    // handling from other exception handling.
-    // This is similar to WinEHPrepare::cloneCommonBlocks and funcletColoring.
-    // Possibly we can refactor the logic out of WinEHPrepare to be reusable.
-    BasicBlock *BB = Lpad->getParent();
-    if (!BB->getSinglePredecessor())
-      return nullptr;
-
-    // Should have exactly one case clause with the catch type matching the
-    // type being thrown.
-    if (Lpad->getNumClauses() != 1)
-      return nullptr;
-
-    if (!Lpad->isCatch(0))
-      return nullptr;
-
-    Constant *CatchClause = Lpad->getClause(0);
-    Constant *TypeInfo = CatchClause->stripPointerCasts();
-    TypeInfo->dump();
-
-    auto *TI2 = Throw->getTypeInfo();
-    TI2->dump();
-    if (TI2 != TypeInfo)
-      return nullptr;
-
-    // Classify all users of LPAD
-    // 1. resume => should be undef, since it will be on dead branches
-    // 2. extractvalue 0 and extractvalue 1, classify those independently
-
-    SmallVector<CxaBeginCatch *, 1> Catches;
-    SmallVector<ICmpInst *, 2> Compares;
-
-    for (const auto &User : Lpad->users()) {
+  static CallInst *getCopyCtor(AllocaInst *AI) {
+    int UserCount = 0;
+    CallInst *CopyCtor = nullptr;
+    for (const auto &User : AI->users()) {
       User->dump();
-      if (auto *EI = dyn_cast<ExtractValueInst>(User)) {
-        if (EI->getNumIndices() != 1)
-          return nullptr;
-
-        const auto Index = *EI->idx_begin();
-        for (const auto &User : EI->users())
-          if (Index == 0) { // Should be begin catch
-            if (auto *BegCatch = dyn_cast<CxaBeginCatch>(User))
-              Catches.push_back(BegCatch);
-            else
-              return nullptr;
-          } else if (Index == 1) { // Should be ICmp
-            if (auto *Cmp = dyn_cast<ICmpInst>(User))
-              Compares.push_back(Cmp);
-            else
-              return nullptr;
-          } else
-            return nullptr;
-
-      } else if (!isa<ResumeInst>(User))
-        return nullptr;
-    }
-
-    // We except to have only one begin catch.
-    if (Catches.size() != 1)
-      return nullptr;
-
-    // We except to have at least one compare
-    if (Compares.size() != 1)
-      return nullptr;
-
-    // Now we need to make sure that there is no unknown calls
-    // between begin catch and end catch.
-    // Think what to do if dtor throws. LATER
-
-    SmallVector<CallInst *, 4> CatchEnds;
-    SmallVector<InvokeInst *, 4> CatchEndInvokes;
-
-    SmallPtrSet<BasicBlock *, 4> Visited;
-    SmallVector<BasicBlock *, 4> WorkList;
-
-    Instruction *Current = Catches[0]->getNextNode();
-    Visited.insert(Current->getParent());
-    for (;;) {
-      while (!Current->isTerminator()) {
-        if (isa<IntrinsicInst>(Current))
-          ; // assume intrinsics are safe
-        else if (auto *CI = dyn_cast<CallInst>(Current)) {
-          if (CheckFnName(CI, "__cxa_end_catch"))
-            CatchEnds.push_back(CI);
-          else
-            return nullptr;
-        }
-        Current = Current->getNextNode();
+      ++UserCount;
+      if (auto *CI = dyn_cast<CallInst>(User)) {
+        if (isEptrCopyCtor(CI))
+          CopyCtor = CI;
       }
-      // TODO: Check if magical icmp
-      if (auto *II = dyn_cast<InvokeInst>(Current)) {
-        if (CheckFnName(II, "__cxa_end_catch"))
-          CatchEndInvokes.push_back(II);
-        else
-          return nullptr;
-      } else {
-        for (auto *Successor : successors(Current->getParent()))
-          if (Visited.count(Successor) == 0)
-            WorkList.push_back(Successor);
-      }
-      if (WorkList.empty())
-        break;
-      auto *NextBlock = WorkList.pop_back_val();
-      Visited.insert(NextBlock);
-      Current = NextBlock->getFirstNonPHIOrDbgOrLifetime();
     }
+    // Should only be used by rethrow, copyctor and dtor.
+    if (UserCount == 3)
+      return CopyCtor;
 
-    for (auto *E : CatchEnds)
-      E->dump();
-    for (auto *E : CatchEndInvokes)
-      E->dump();
-
-    return Lpad;
+    return nullptr;
   }
 
-  bool simplify() {
-#if 0
-    auto *BB = BeginCatch->getParent();
-    auto *CatchAll = BB->getLandingPadInst();
-    if (!CatchAll)
-      return false;
+  static void RemoveAndReplaceWithUndef(Instruction *I) {
+    I->replaceAllUsesWith(UndefValue::get(I->getType()));
+    I->eraseFromParent();
+  }
 
-    ExtractValueInst *Extract = nullptr;
-    for (Use &U : CatchAll->uses())
-      if (Extract)
-        return false;
-      else if (auto EVI = dyn_cast<ExtractValueInst>(U.getUser()))
-        Extract = EVI;
-      else
-        return false; // don't know how to handle this.
+  bool tryOptimize() {
+    ///////////////////////////////////////////////////////////////////////////
+    //
+    //  Transforms (conceptually):
+    //
+    //       copy = COPY_EPTR(src)
+    //       RETHROW(copy) into LPAD
+    //
+    //       CATCH(...)
+    //       <cleanup>
+    //       DTOR(copy)
+    //       dst = CURRENT_EPTR()
+    //
+    //   into (if lifetime of src allows):
+    //
+    //       <cleanup>
+    //       dst = COPY_EPTR(src)
+    //
+    //   or into
+    //
+    //       copy = COPY_EPTR(src)
+    //       <cleanup>
+    //       dst = COPY_EPTR(copy)
+    //       DTOR(copy)
 
-    BeginCatch->eraseFromParent();
-    BranchInst::Create(EndCatch->getNormalDest(), Throw);
-    Throw->eraseFromParent();
+    // Grab destination from: dst = CURRENT_EPTR().
+    Value *Dst = CurrentEptr->getArgOperand(0);
 
-    auto *LpadClone = Lpad->clone();
-    LpadClone->insertBefore(CatchAll);
-    Lpad->replaceAllUsesWith(LpadClone);
+    // Move CopyCtor just before CurrentException and replace destnation.
+    EptrCopyCtor->moveBefore(CurrentEptr);
+    EptrCopyCtor->setArgOperand(0, Dst);
 
-    auto *Undef = UndefValue::get(CatchAll->getType());
-    CatchAll->replaceAllUsesWith(Undef);
-    CatchAll->eraseFromParent();
+    // Replace RethrowInvoke with regular branch.
+    BranchInst::Create(LandingPad->getParent(), Rethrow);
 
-    if (Extract->user_empty())
-      Extract->eraseFromParent();
-#endif
+    // Remove the rest of the instructions.
+    RemoveAndReplaceWithUndef(Rethrow);
+    RemoveAndReplaceWithUndef(LandingPad);
+    RemoveAndReplaceWithUndef(EptrDtor);
+    RemoveAndReplaceWithUndef(CurrentEptr);
+    RemoveAndReplaceWithUndef(CxaBegin);
+    RemoveAndReplaceWithUndef(CxaEnd);
     return true;
+  }
+
+  bool getTheRestFromLandingPad() {
+    // We verified that the instruction before the last one is CxaEndCatch
+    // while checking whether this rethrow is an optimization candidate.
+    auto *const LandingPadBB = LandingPad->getParent();
+    CxaEnd = cast<CallInst>(LandingPadBB->getTerminator()->getPrevNode());
+    assert(CheckFnName(CxaEnd, "__cxa_end_catch"));
+
+    // The rest of the interesting instructions are in the LandingPadBlock
+    // between the LandingPadInst and the CxaCatchEnd.
+    for (Instruction *Current = LandingPad->getNextNode(); Current != CxaEnd;
+         Current = Current->getNextNode()) {
+      if (auto *CI = dyn_cast<CallInst>(Current)) {
+        if (isEptrDtor(CI)) {
+          // It must be the one referring to the EptrAlloca that is being
+          // rethrown and we have not seen this dtor before.
+          if (CI->getArgOperand(0) == EptrAlloca && !EptrDtor) {
+            EptrDtor = CI;
+            continue;
+          }
+        } else if (auto BC = dyn_cast<CxaBeginCatch>(CI)) {
+          // It must belong to our lpad and we should not have seen another one.
+          if (BC->tryGetLandingPad() == LandingPad && !CxaBegin) {
+            CxaBegin = BC;
+            continue;
+          }
+        } else if (isCurrentEptr(CI) && !CurrentEptr) {
+          CurrentEptr = CI;
+          continue;
+        }
+        // If any other call found or other checks failed, we are not in the
+        // simple case. Bail out.
+        return false;
+      }
+    }
+
+    // Found all.
+    if (EptrDtor && CxaBegin && CurrentEptr)
+      return true;
+
+    return false;
   }
 };
 } // namespace
-#endif
 
 static bool simplifyGNU_CXX(Function &F) {
   bool anyChanges = false;
   SmallPtrSet<LandingPadInst *, 4> SimplificationCandidates;
+  SmallVector<EptrRethrowInst *, 1> EptrSimplificationCandidates;
 
   for (auto &BB : F)
     if (LandingPadInst *LP = isShortCircuitCandidate(BB))
       SimplificationCandidates.insert(LP);
+    else if (auto *EptrRethrow = isEptrShortCircuitCandidate(BB))
+      EptrSimplificationCandidates.push_back(EptrRethrow);
+
+  for (auto *Rethrow : EptrSimplificationCandidates)
+    if (EptrRethrowOptimizer opt{Rethrow})
+      anyChanges |= opt.tryOptimize();
 
   for (auto *LP : SimplificationCandidates)
     anyChanges |= examineBlocksAndSimplify(LP);
