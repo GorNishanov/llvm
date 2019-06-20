@@ -242,6 +242,96 @@ static void handleFinalSuspend(IRBuilder<> &Builder, Value *FramePtr,
 // Create a resume clone by cloning the body of the original function, setting
 // new entry block and replacing coro.suspend an appropriate value to force
 // resume or cleanup pass for every suspend point.
+static Function *createInitClone(Function &F, coro::Shape &Shape) {
+  Module *M = F.getParent();
+  auto *FrameTy = Shape.FrameTy;
+  auto *FnPtrTy = cast<PointerType>(FrameTy->getElementType(0));
+  auto *FnTy = cast<FunctionType>(FnPtrTy->getElementType());
+
+  Function *NewF =
+      Function::Create(FnTy, GlobalValue::LinkageTypes::ExternalLinkage,
+                       F.getName() + ".init.res", M);
+  NewF->addParamAttr(0, Attribute::NonNull);
+  NewF->addParamAttr(0, Attribute::NoAlias);
+
+  ValueToValueMapTy VMap;
+  // Replace all args with undefs. The buildCoroutineFrame algorithm already
+  // rewritten access to the args that occurs after suspend points with loads
+  // and stores to/from the coroutine frame.
+  for (Argument &A : F.args())
+    VMap[&A] = UndefValue::get(A.getType());
+
+  SmallVector<ReturnInst *, 4> Returns;
+
+  CloneFunctionInto(NewF, &F, VMap, /*ModuleLevelChanges=*/true, Returns);
+  NewF->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+
+  // Remove old returns.
+  for (ReturnInst *Return : Returns)
+    changeToUnreachable(Return, /*UseLLVMTrap=*/false);
+
+  // Remove old return attributes.
+  NewF->removeAttributes(
+      AttributeList::ReturnIndex,
+      AttributeFuncs::typeIncompatible(NewF->getReturnType()));
+
+  if (Shape.CoroInitResumes.size() != 1)
+    report_fatal_error("there must be only one CoroInitResume");
+
+  auto *OrigCIR = Shape.CoroInitResumes[0];
+  auto *CIR = cast<CoroInitResumeInst>(VMap[OrigCIR]);
+  auto *StartBB = CIR->getNormalDest();
+
+  auto &OldEntryBlock = NewF->getEntryBlock();
+  OldEntryBlock.setName("old_entry");
+
+  // Make AllocaSpillBlock the new entry block.
+  auto *Entry = cast<BasicBlock>(VMap[Shape.AllocaSpillBlock]);
+  Entry->moveBefore(&OldEntryBlock);
+  Entry->getTerminator()->eraseFromParent();
+  BranchInst::Create(StartBB, Entry);
+  Entry->setName("entry");
+
+  IRBuilder<> Builder(&NewF->getEntryBlock().front());
+
+  // Remap frame pointer.
+  Argument *NewFramePtr = &*NewF->arg_begin();
+  Value *OldFramePtr = cast<Value>(VMap[Shape.FramePtr]);
+  NewFramePtr->takeName(OldFramePtr);
+  OldFramePtr->replaceAllUsesWith(NewFramePtr);
+
+  // Remap vFrame pointer.
+  auto *NewVFrame = Builder.CreateBitCast(
+      NewFramePtr, Type::getInt8PtrTy(Builder.getContext()), "vFrame");
+  Value *OldVFrame = cast<Value>(VMap[Shape.CoroBegin]);
+  OldVFrame->replaceAllUsesWith(NewVFrame);
+
+  auto &Context = Entry->getContext();
+  auto *False = ConstantInt::getFalse(Context);
+  auto *True = ConstantInt::getTrue(Context);
+  CIR->replaceAllUsesWith(True);
+  OrigCIR->replaceAllUsesWith(False);
+
+  auto *NewInv = InvokeInst::Create(FnTy, NewF, OrigCIR->getNormalDest(),
+                                    OrigCIR->getUnwindDest(), {Shape.FramePtr},
+                                    "", OrigCIR);
+  OrigCIR->eraseFromParent();
+  NewInv->setCallingConv(CallingConv::Fast);
+  NewF->setCallingConv(CallingConv::Fast);
+
+  // Remove coro.end intrinsics.
+  replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
+  replaceUnwindCoroEnds(Shape, VMap);
+
+  coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
+                        /*Elide=*/false);
+
+  return NewF;
+}
+
+// Create a resume clone by cloning the body of the original function, setting
+// new entry block and replacing coro.suspend an appropriate value to force
+// resume or cleanup pass for every suspend point.
 static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
                              BasicBlock *ResumeEntry, int8_t FnIndex) {
   Module *M = F.getParent();
@@ -802,11 +892,13 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   auto ResumeClone = createClone(F, ".resume", Shape, ResumeEntry, 0);
   auto DestroyClone = createClone(F, ".destroy", Shape, ResumeEntry, 1);
   auto CleanupClone = createClone(F, ".cleanup", Shape, ResumeEntry, 2);
+  auto *InitResClone = createInitClone(F, Shape);
 
   // We no longer need coro.end in F.
   removeCoroEnds(Shape);
 
   postSplitCleanup(F);
+  postSplitCleanup(*InitResClone);
   postSplitCleanup(*ResumeClone);
   postSplitCleanup(*DestroyClone);
   postSplitCleanup(*CleanupClone);
@@ -822,7 +914,8 @@ static void splitCoroutine(Function &F, CallGraph &CG, CallGraphSCC &SCC) {
   setCoroInfo(F, Shape.CoroBegin, {ResumeClone, DestroyClone, CleanupClone});
 
   // Update call graph and add the functions we created to the SCC.
-  coro::updateCallGraph(F, {ResumeClone, DestroyClone, CleanupClone}, CG, SCC);
+  coro::updateCallGraph(
+      F, {ResumeClone, DestroyClone, CleanupClone, InitResClone}, CG, SCC);
 }
 
 // When we see the coroutine the first time, we insert an indirect call to a

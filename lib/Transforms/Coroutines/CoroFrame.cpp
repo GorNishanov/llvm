@@ -177,7 +177,7 @@ SuspendCrossingInfo::SuspendCrossingInfo(Function &F, coro::Shape &Shape)
   // consume. Note, that crossing coro.save also requires a spill, as any code
   // between coro.save and coro.suspend may resume the coroutine and all of the
   // state needs to be saved by that time.
-  auto markSuspendBlock = [&](IntrinsicInst *BarrierInst) {
+  auto markSuspendBlock = [&](Instruction *BarrierInst) {
     BasicBlock *SuspendBlock = BarrierInst->getParent();
     auto &B = getBlockData(SuspendBlock);
     B.Suspend = true;
@@ -186,6 +186,9 @@ SuspendCrossingInfo::SuspendCrossingInfo(Function &F, coro::Shape &Shape)
   for (CoroSuspendInst *CSI : Shape.CoroSuspends) {
     markSuspendBlock(CSI);
     markSuspendBlock(CSI->getCoroSave());
+  }
+  for (CoroInitResumeInst *CRI : Shape.CoroInitResumes) {
+    markSuspendBlock(CRI);
   }
 
   // Iterate propagating consumes and kills until they stop changing.
@@ -754,7 +757,7 @@ static bool materializable(Instruction &V) {
 // the coroutine frame.
 static bool isCoroutineStructureIntrinsic(Instruction &I) {
   return isa<CoroIdInst>(&I) || isa<CoroSaveInst>(&I) ||
-         isa<CoroSuspendInst>(&I);
+         isa<CoroInitResumeInst>(&I) || isa<CoroSuspendInst>(&I);
 }
 
 // For every use of the value that is across suspend point, recreate that value
@@ -871,6 +874,9 @@ void coro::buildCoroutineFrame(Function &F, Shape &Shape) {
   if (Shape.PromiseAlloca) {
     Shape.CoroBegin->getId()->clearPromise();
   }
+
+  for (CoroInitResumeInst *CIR : Shape.CoroInitResumes)
+    splitBlockIfNotFirst(CIR, "CoroInitRes");
 
   // Make sure that all coro.save, coro.suspend and the fallthrough coro.end
   // intrinsics are in their own blocks to simplify the logic of building up
