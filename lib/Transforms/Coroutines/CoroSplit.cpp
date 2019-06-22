@@ -180,31 +180,37 @@ static void replaceFallthroughCoroEnd(IntrinsicInst *End,
   BB->getTerminator()->eraseFromParent();
 }
 
+// Cuts off the rest of the unwind. In LandingPad model, it is achieved, by
+// replacing the target instruction with True, since it is expected for the FE
+// to provide a branch jumping to the resume instruction. On WinEH model,
+// we replace the intrinsic with cleanupret instructions.
+static void cutOffUnwind(IntrinsicInst* Inst, ValueToValueMapTy &VMap) {
+  LLVMContext &Context = Inst->getContext();
+  auto *True = ConstantInt::getTrue(Context);
+  auto *NewCE = cast<IntrinsicInst>(VMap[Inst]);
+
+  // In WinEH, extract the funclet info from an associated bundle, an
+  // add cleanupret instruction.
+  if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
+    Value *FromPad = Bundle->Inputs[0];
+    auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
+    NewCE->getParent()->splitBasicBlock(NewCE);
+    CleanupRet->getParent()->getTerminator()->eraseFromParent();
+  }
+
+  NewCE->replaceAllUsesWith(True);
+  NewCE->eraseFromParent();
+}
+
 // In Resumers, we replace unwind coro.end with True to force the immediate
 // unwind to caller.
 static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
   if (Shape.CoroEnds.empty())
     return;
 
-  LLVMContext &Context = Shape.CoroEnds.front()->getContext();
-  auto *True = ConstantInt::getTrue(Context);
-  for (CoroEndInst *CE : Shape.CoroEnds) {
-    if (!CE->isUnwind())
-      continue;
-
-    auto *NewCE = cast<IntrinsicInst>(VMap[CE]);
-
-    // If coro.end has an associated bundle, add cleanupret instruction.
-    if (auto Bundle = NewCE->getOperandBundle(LLVMContext::OB_funclet)) {
-      Value *FromPad = Bundle->Inputs[0];
-      auto *CleanupRet = CleanupReturnInst::Create(FromPad, nullptr, NewCE);
-      NewCE->getParent()->splitBasicBlock(NewCE);
-      CleanupRet->getParent()->getTerminator()->eraseFromParent();
-    }
-
-    NewCE->replaceAllUsesWith(True);
-    NewCE->eraseFromParent();
-  }
+  for (CoroEndInst *CE : Shape.CoroEnds)
+    if (CE->isUnwind())
+      cutOffUnwind(CE, VMap);
 }
 
 // Rewrite final suspend point handling. We do not use suspend index to
