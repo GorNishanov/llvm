@@ -229,6 +229,21 @@ static void replaceInitEnds(coro::Shape &Shape, ValueToValueMapTy &VMap, bool cu
       dontCutOffUnwind(CE, VMap);
 }
 
+// FIXME: Update commend
+// FIXME: Refactor?
+static void replaceEhSuspends(coro::Shape &Shape, ValueToValueMapTy &VMap,
+                            bool cutOff) {
+  for (CoroEhSuspendInst *CE : Shape.CoroEhSuspends) {
+    auto *Save = CE->getCoroSave();
+    if (cutOff)
+      cutOffUnwind(CE, VMap);
+    else
+      dontCutOffUnwind(CE, VMap);
+    if (Save)
+      cast<Instruction>(VMap[Save])->eraseFromParent();
+  }
+}
+
 // Rewrite final suspend point handling. We do not use suspend index to
 // represent the final suspend point. Instead we zero-out ResumeFnAddr in the
 // coroutine frame, since it is undefined behavior to resume a coroutine
@@ -345,12 +360,13 @@ static Function *createInitClone(Function &F, coro::Shape &Shape) {
   replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
   replaceUnwindCoroEnds(Shape, VMap);
   replaceInitEnds(Shape, VMap, /*Cutoff=*/true);
+  replaceEhSuspends(Shape, VMap, /*Cutoff=*/false);
 
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
                         /*Elide=*/false);
 
   return NewF;
-}
+} /* createInitClone */
 
 // Create a resume clone by cloning the body of the original function, setting
 // new entry block and replacing coro.suspend an appropriate value to force
@@ -440,6 +456,8 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
   replaceUnwindCoroEnds(Shape, VMap);
   replaceInitEnds(Shape, VMap, /*Cutoff=*/false);
+  replaceEhSuspends(Shape, VMap, /*Cutoff=*/true);
+
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
   // to suppress deallocation code.
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
@@ -448,7 +466,7 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   NewF->setCallingConv(CallingConv::Fast);
 
   return NewF;
-}
+} /* createClone */
 
 static void removeCoroEnds(coro::Shape &Shape) {
   if (Shape.CoroEnds.empty())

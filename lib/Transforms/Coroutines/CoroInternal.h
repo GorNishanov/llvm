@@ -70,6 +70,7 @@ struct LLVM_LIBRARY_VISIBILITY Shape {
   SmallVector<CoroSuspendInst *, 4> CoroSuspends;
   SmallVector<CoroInitResumeInst *, 1> CoroInitResumes;
   SmallVector<IntrinsicInst*, 1> CoroInitEnds;
+  SmallVector<CoroEhSuspendInst *, 1> CoroEhSuspends;
 
   // Field Indexes for known coroutine frame fields.
   enum {
