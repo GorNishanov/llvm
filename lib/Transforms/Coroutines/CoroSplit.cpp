@@ -202,15 +202,31 @@ static void cutOffUnwind(IntrinsicInst* Inst, ValueToValueMapTy &VMap) {
   NewCE->eraseFromParent();
 }
 
+static void dontCutOffUnwind(IntrinsicInst *Inst, ValueToValueMapTy &VMap) {
+  LLVMContext &Context = Inst->getContext();
+  auto *False = ConstantInt::getTrue(Context);
+  auto *NewCE = cast<IntrinsicInst>(VMap[Inst]);
+  NewCE->replaceAllUsesWith(False);
+  NewCE->eraseFromParent();
+}
+
+// FIXME: Update commend
 // In Resumers, we replace unwind coro.end with True to force the immediate
 // unwind to caller.
 static void replaceUnwindCoroEnds(coro::Shape &Shape, ValueToValueMapTy &VMap) {
-  if (Shape.CoroEnds.empty())
-    return;
-
   for (CoroEndInst *CE : Shape.CoroEnds)
     if (CE->isUnwind())
       cutOffUnwind(CE, VMap);
+}
+
+// FIXME: Update commend
+// FIXME: Refactor?
+static void replaceInitEnds(coro::Shape &Shape, ValueToValueMapTy &VMap, bool cutOff) {
+  for (IntrinsicInst *CE : Shape.CoroInitEnds)
+    if (cutOff)
+      cutOffUnwind(CE, VMap);
+    else
+      dontCutOffUnwind(CE, VMap);
 }
 
 // Rewrite final suspend point handling. We do not use suspend index to
@@ -328,6 +344,7 @@ static Function *createInitClone(Function &F, coro::Shape &Shape) {
   // Remove coro.end intrinsics.
   replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
   replaceUnwindCoroEnds(Shape, VMap);
+  replaceInitEnds(Shape, VMap, /*Cutoff=*/true);
 
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
                         /*Elide=*/false);
@@ -422,6 +439,7 @@ static Function *createClone(Function &F, Twine Suffix, coro::Shape &Shape,
   // Remove coro.end intrinsics.
   replaceFallthroughCoroEnd(Shape.CoroEnds.front(), VMap);
   replaceUnwindCoroEnds(Shape, VMap);
+  replaceInitEnds(Shape, VMap, /*Cutoff=*/false);
   // Eliminate coro.free from the clones, replacing it with 'null' in cleanup,
   // to suppress deallocation code.
   coro::replaceCoroFree(cast<CoroIdInst>(VMap[Shape.CoroBegin->getId()]),
